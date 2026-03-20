@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <style>
+    body { font-family: Arial, sans-serif; width: 300px; padding: 12px; background: #1a1a2e; color: #fff; margin: 0; }
+    h2 { margin: 0 0 12px; font-size: 14px; color: #4ecca3; text-align: center; }
+    .section { margin-bottom: 10px; }
+    .section-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px; }
+    .section-title { font-size: 12px; font-weight: bold; color: #fff; }
+    .badge { font-size: 10px; }
+    .card { background: #16213e; border-radius: 8px; padding: 8px 10px; display: flex; justify-content: space-between; align-items: center; transition: opacity 0.3s; }
+    .card.inativo { opacity: 0.35; }
+    .winner { font-weight: bold; font-size: 13px; }
+    .msg { font-size: 11px; color: #888; font-style: italic; margin-top: 3px; }
+    .casa { color: #e94560; }
+    .visitante { color: #4ecca3; }
+    .empate { color: #f0a500; }
+    .count { font-size: 18px; font-weight: bold; color: #4ecca3; min-width: 30px; text-align: right; }
+    .time { font-size: 10px; color: #555; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <h2>🎯 AlphaSignal Capture</h2>
+
+  <div class="section">
+    <div class="section-header">
+      <div class="section-title">🎲 Bac Bo</div>
+      <div class="badge" id="bacbo-badge">⚫ Inativo</div>
+    </div>
+    <div class="card" id="bacbo-card">
+      <div>
+        <div class="winner" id="bacbo-ultimo">—</div>
+        <div class="time" id="bacbo-tempo">—</div>
+        <div class="msg" id="bacbo-msg">Abra o jogo para capturar</div>
+      </div>
+      <div class="count" id="bacbo-total">0</div>
+    </div>
+  </div>
+
+  <div class="section">
+    <div class="section-header">
+      <div class="section-title">⚽ Football Studio</div>
+      <div class="badge" id="fs-badge">⚫ Inativo</div>
+    </div>
+    <div class="card" id="fs-card">
+      <div>
+        <div class="winner" id="fs-ultimo">—</div>
+        <div class="time" id="fs-tempo">—</div>
+        <div class="msg" id="fs-msg">Abra o jogo para capturar</div>
+      </div>
+      <div class="count" id="fs-total">0</div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>

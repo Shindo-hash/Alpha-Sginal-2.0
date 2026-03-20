@@ -1,0 +1,159 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&family=Rajdhani:wght@500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    --background: 0 0% 2%;
+    --foreground: 0 0% 98%;
+    --card: 0 0% 4%;
+    --card-foreground: 0 0% 98%;
+    --popover: 0 0% 4%;
+    --popover-foreground: 0 0% 98%;
+    --primary: 187 100% 50%;
+    --primary-foreground: 0 0% 0%;
+    --secondary: 0 0% 10%;
+    --secondary-foreground: 0 0% 98%;
+    --muted: 0 0% 10%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 10%;
+    --accent-foreground: 0 0% 98%;
+    --destructive: 348 100% 50%;
+    --destructive-foreground: 0 0% 98%;
+    --border: 0 0% 15%;
+    --input: 0 0% 15%;
+    --ring: 187 100% 50%;
+    --radius: 0.25rem;
+    --chart-1: 187 100% 50%;
+    --chart-2: 348 100% 50%;
+    --chart-3: 54 100% 50%;
+    --chart-4: 140 100% 50%;
+    --chart-5: 280 65% 60%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  body {
+    @apply bg-background text-foreground font-body;
+    background-color: #050505;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0A0A0A;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1F1F1F;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #333;
+}
+
+/* Glow utilities */
+.glow-player {
+  box-shadow: 0 0 10px rgba(0, 240, 255, 0.5), 0 0 20px rgba(0, 240, 255, 0.3);
+}
+
+.glow-banker {
+  box-shadow: 0 0 10px rgba(255, 0, 60, 0.5), 0 0 20px rgba(255, 0, 60, 0.3);
+}
+
+.glow-tie {
+  box-shadow: 0 0 10px rgba(255, 230, 0, 0.5), 0 0 20px rgba(255, 230, 0, 0.3);
+}
+
+/* Neon text */
+.neon-player {
+  color: #00F0FF;
+  text-shadow: 0 0 5px #00F0FF, 0 0 10px #00F0FF;
+}
+
+.neon-banker {
+  color: #FF003C;
+  text-shadow: 0 0 5px #FF003C, 0 0 10px #FF003C;
+}
+
+.neon-tie {
+  color: #FFE600;
+  text-shadow: 0 0 5px #FFE600, 0 0 10px #FFE600;
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(10, 10, 10, 0.7);
+  backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+/* Pulse animation for signals */
+@keyframes signal-pulse {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 0 0 0 rgba(0, 240, 255, 0.7);
+  }
+  50% {
+    transform: scale(1.02);
+    box-shadow: 0 0 0 10px rgba(0, 240, 255, 0);
+  }
+}
+
+.animate-signal-pulse {
+  animation: signal-pulse 2s infinite;
+}
+
+/* Casino chip style */
+.casino-chip {
+  @apply w-8 h-8 rounded-full flex items-center justify-center text-xs font-mono font-bold;
+  border: 2px solid currentColor;
+}
+
+.casino-chip-player {
+  @apply text-player border-player;
+  background: rgba(0, 240, 255, 0.1);
+}
+
+.casino-chip-banker {
+  @apply text-banker border-banker;
+  background: rgba(255, 0, 60, 0.1);
+}
+
+.casino-chip-tie {
+  @apply text-tie border-tie;
+  background: rgba(255, 230, 0, 0.1);
+}
+
+/* Entry animations */
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.animate-fadeIn {
+  animation: fadeIn 0.3s ease-out forwards;
+}
+
+@layer base {
+  [data-debug-wrapper="true"] {
+    display: contents !important;
+  }
+}

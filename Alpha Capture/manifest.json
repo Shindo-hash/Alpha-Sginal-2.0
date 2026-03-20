@@ -1,0 +1,72 @@
+{
+  "manifest_version": 3,
+  "name": "AlphaSignal Capture",
+  "version": "1.0",
+  "description": "Captura resultados de Bac Bo e Football Studio",
+
+  "permissions": [
+    "storage",
+    "activeTab",
+    "scripting"
+  ],
+
+  "host_permissions": [
+    "*://cassino.bet.br/*",
+    "*://*.bet.br/*",
+    "*://*.evolution.com/*",
+    "*://*.evolutiongaming.com/*",
+    "*://*.evo-games.com/*",
+    "*://s3.eu-central-1.amazonaws.com/*",
+    "http://localhost:8001/*"
+  ],
+
+  "background": {
+    "service_worker": "background.js"
+  },
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://cassino.bet.br/*",
+        "*://*.bet.br/*",
+        "*://*.evolution.com/*",
+        "*://*.evolutiongaming.com/*",
+        "*://*.evo-games.com/*",
+        "*://s3.eu-central-1.amazonaws.com/*"
+      ],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "all_frames": true,
+      "world": "MAIN"
+    },
+    {
+      "matches": [
+        "*://cassino.bet.br/*",
+        "*://*.bet.br/*",
+        "*://*.evolution.com/*",
+        "*://*.evolutiongaming.com/*",
+        "*://*.evo-games.com/*",
+        "*://s3.eu-central-1.amazonaws.com/*"
+      ],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "all_frames": true
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "AlphaSignal Capture",
+    "default_icon": {
+      "16": "icon16.png",
+      "48": "icon48.png",
+      "128": "icon128.png"
+    }
+  },
+
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  }
+}
