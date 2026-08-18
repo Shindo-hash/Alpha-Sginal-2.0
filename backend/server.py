@@ -31,7 +31,10 @@ game_history: List[Dict[str, Any]] = []
 stats = {"wins": 0, "losses": 0, "total_signals": 0}
 pattern_weights: Dict[str, float] = {}
 logs: List[Dict[str, Any]] = []
+resolved_signals: List[Dict[str, Any]] = []  # histórico detalhado de sinais resolvidos (clicável no front)
 current_signal: Optional[Dict[str, Any]] = None
+current_tie_watch: Optional[Dict[str, Any]] = None  # Empate Seco pendente (número/padrão puxando empate)
+tie_watch_registry: Dict[str, Dict] = {}  # watch_id -> detalhes (evita contagem dupla)
 active_strategy = "consensus"
 min_probability = 60
 auto_select = True  # auto-seleção de estratégia ativa
@@ -39,14 +42,17 @@ auto_select = True  # auto-seleção de estratégia ativa
 # Placar por estratégia para auto-seleção
 strategy_stats: Dict[str, Dict] = {
     "adaptive":  {"wins": 0, "losses": 0, "total": 0},
-    "pressure":  {"wins": 0, "losses": 0, "total": 0},
+    "number":    {"wins": 0, "losses": 0, "total": 0},
+    "number_pro":{"wins": 0, "losses": 0, "total": 0},
     "consensus": {"wins": 0, "losses": 0, "total": 0},
 }
 last_signal_strategy: Optional[str] = None  # qual estratégia gerou o sinal atual
+signal_strategy_map: Dict[str, str] = {}  # signal_id -> estratégia que o gerou (evita contagem dupla/errada)
 user_triggers: List[Dict[str, Any]] = []  # gatilhos cadastrados pelo usuário
 cooldown_results: int = 0  # resultados recebidos desde último win/loss (cooldown)
 last_activity: float = time.time()  # timestamp da última atividade
 session_token: str = str(int(time.time()))  # muda a cada reconexão (historico)
+session_start_time: float = time.time()  # marca início da sessão, pra calcular tempo de mesa e sinais/min
 AUTO_RESET_MINUTES: int = 30  # reseta após X minutos sem uso
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -244,6 +250,103 @@ def analyze_pressure(history: List[Dict]) -> Dict[str, Any]:
         "reason": f"{streak['length']}x {streak['current_streak']} seguidos → reversão para {opposite} ({probability}%)",
         "strategy": "pressure",
         "streak_length": streak["length"]
+    }
+
+
+def _number_pull_raw(history: List[Dict]) -> Dict[str, Any]:
+    """
+    Cálculo puro (sem consenso): pega o número (2-12) do lado vencedor da
+    última rodada e verifica, em todas as ocorrências desse mesmo número
+    no histórico de 150, o que veio na rodada SEGUINTE.
+    """
+    clean = [r for r in history if r.get("winner") in ("Player", "Banker")]
+
+    if len(clean) < 6:
+        return {"signal": None, "probability": 0, "reason": "Aguardando mais resultados para análise por número"}
+
+    def winning_number(r: Dict) -> Optional[int]:
+        if r.get("winner") == "Player":
+            return r.get("player")
+        if r.get("winner") == "Banker":
+            return r.get("banker")
+        return None
+
+    current_number = winning_number(clean[-1])
+    if current_number is None:
+        return {"signal": None, "probability": 0, "reason": "Número do último resultado indisponível"}
+
+    # Varre o histórico (exceto o último) contando o que veio depois de cada número
+    pulls = {"Player": 0, "Banker": 0}
+    for i in range(len(clean) - 1):
+        num = winning_number(clean[i])
+        if num == current_number:
+            next_winner = clean[i + 1].get("winner")
+            if next_winner in pulls:
+                pulls[next_winner] += 1
+
+    total = pulls["Player"] + pulls["Banker"]
+
+    if total < 3:
+        return {
+            "signal": None, "probability": 0,
+            "reason": f"Número {current_number} apareceu só {total}x até agora — dados insuficientes",
+            "number": current_number, "pulls": pulls
+        }
+
+    best = "Player" if pulls["Player"] > pulls["Banker"] else "Banker"
+    probability = round((max(pulls["Player"], pulls["Banker"]) / total) * 100, 1)
+    base_msg = f"Número {current_number} apareceu {total}x e puxou {best} {pulls[best]}x ({probability}%)"
+
+    if probability < min_probability:
+        reason = f"{base_msg} — abaixo do mínimo, sem entrada"
+    else:
+        reason = f"{base_msg} — ENTRADA"
+
+    return {
+        "signal": best if probability >= min_probability else None,
+        "probability": probability,
+        "reason": reason,
+        "number": current_number, "pulls": pulls, "best": best, "total": total
+    }
+
+
+def analyze_number(history: List[Dict]) -> Dict[str, Any]:
+    """
+    Estratégia Número 🎲 (solo): usa só o critério do número puxando cor,
+    sem exigir concordância de nenhuma outra estratégia.
+    """
+    raw = _number_pull_raw(history)
+    raw["strategy"] = "number"
+    return raw
+
+
+def analyze_number_pro(history: List[Dict]) -> Dict[str, Any]:
+    """
+    Estratégia Número PRO 🎲: igual à Número, mas só confirma o sinal se a
+    estratégia Adaptativo concordar com a mesma cor (consenso obrigatório).
+    """
+    raw = _number_pull_raw(history)
+    number, pulls = raw.get("number"), raw.get("pulls")
+
+    if not raw["signal"]:
+        return {**raw, "strategy": "number_pro"}
+
+    adaptive = analyze_adaptive(history)
+    best, probability, total = raw["best"], raw["probability"], raw["total"]
+    base_msg = f"Número {number} apareceu {total}x e puxou {best} {pulls[best]}x ({probability}%)"
+
+    if adaptive["signal"] != best:
+        return {
+            "signal": None, "probability": probability,
+            "reason": f"{base_msg}, mas o Adaptativo aponta outro lado — sem consenso, aguardando",
+            "strategy": "number_pro", "number": number, "pulls": pulls
+        }
+
+    return {
+        "signal": best,
+        "probability": probability,
+        "reason": f"{base_msg} + Adaptativo concorda — CONSENSO, entrada {best}",
+        "strategy": "number_pro", "number": number, "pulls": pulls
     }
 
 
@@ -555,9 +658,109 @@ def analyze_alternancia(history: List[Dict]) -> Dict[str, Any]:
     }
 
 
+TIE_MIN_OCCURRENCES = 4
+TIE_MIN_RATE = 25.0
+
+# Tabela de multiplicador de Empate no Bac Bo, por número do dado vencedor (2-12)
+TIE_MULTIPLIER_TABLE = {
+    6: 4, 7: 4, 8: 4,
+    5: 6, 9: 6,
+    4: 10, 10: 10,
+    3: 25, 11: 25,
+    2: 88, 12: 88,
+}
+def get_tie_multiplier(number: Optional[int]) -> Optional[int]:
+    return TIE_MULTIPLIER_TABLE.get(number)
+
+def now_hm() -> str:
+    """Horário local formatado HH:MM, usado nos itens do histórico de sinais resolvidos."""
+    return time.strftime("%H:%M")
+
+def _number_tie_watch(history: List[Dict]) -> Optional[Dict[str, Any]]:
+    """Vê se o número da última rodada tem histórico forte de puxar Empate."""
+    if len(history) < 6:
+        return None
+
+    def dice_number(r: Dict) -> Optional[int]:
+        if r.get("winner") == "Player":
+            return r.get("player")
+        if r.get("winner") == "Banker":
+            return r.get("banker")
+        if r.get("winner") == "Tie":
+            return r.get("player")  # empate: player == banker
+        return None
+
+    current_number = dice_number(history[-1])
+    if current_number is None:
+        return None
+
+    tie_count, total = 0, 0
+    for i in range(len(history) - 1):
+        if dice_number(history[i]) == current_number:
+            total += 1
+            if history[i + 1].get("winner") == "Tie":
+                tie_count += 1
+
+    if total < TIE_MIN_OCCURRENCES:
+        return None
+    tie_rate = round((tie_count / total) * 100, 1)
+    if tie_rate < TIE_MIN_RATE:
+        return None
+
+    return {
+        "source": "number",
+        "number": current_number,
+        "tie_count": tie_count,
+        "total": total,
+        "tie_rate": tie_rate,
+        "reason": f"Número {current_number} apareceu {total}x e puxou Empate {tie_count}x ({tie_rate}%)"
+    }
+
+
+def _pattern_tie_watch(history: List[Dict]) -> Optional[Dict[str, Any]]:
+    """Vê se o padrão atual dos últimos 3 resultados tem histórico forte de puxar Empate."""
+    patterns = AnalysisEngine.detect_patterns(history)
+    current_pattern = AnalysisEngine.get_sequence_string(history, 3)
+
+    if current_pattern not in patterns:
+        return None
+
+    data = patterns[current_pattern]
+    if data["count"] < TIE_MIN_OCCURRENCES:
+        return None
+    if data["Tie"] < TIE_MIN_RATE:
+        return None
+
+    return {
+        "source": "pattern",
+        "pattern": current_pattern,
+        "count": data["count"],
+        "tie_rate": data["Tie"],
+        "reason": f"Padrão '{current_pattern}' apareceu {data['count']}x e puxou Empate {data['Tie']}%"
+    }
+
+
+def analyze_tie_watch(history: List[Dict]) -> Dict[str, Any]:
+    """
+    Aviso independente de Empate Seco 🟡 — não é uma entrada de cor, é só um
+    alerta separado. NUNCA entra no placar (o front nunca manda feedback
+    pra isso pro backend, só mostra visualmente se acertou ou não).
+    """
+    alerts = []
+    num_alert = _number_tie_watch(history)
+    if num_alert:
+        alerts.append(num_alert)
+    pattern_alert = _pattern_tie_watch(history)
+    if pattern_alert:
+        alerts.append(pattern_alert)
+
+    return {"active": len(alerts) > 0, "alerts": alerts}
+
+
 STRATEGY_MAP = {
     "adaptive": analyze_adaptive,
-    "pressure": analyze_pressure,
+    "number": analyze_number,
+    "number_pro": analyze_number_pro,
     "consensus": analyze_consensus,
     "sequential": analyze_sequential,
     "alternancia": analyze_alternancia,
@@ -573,18 +776,24 @@ async def login(request: Request):
     data = await request.json()
     if data.get("username") == APP_USER and data.get("password") == APP_PASSWORD:
         # Zera histórico de ambos os jogos ao fazer login
-        global game_history, logs, current_signal, cooldown_results, session_token
-        global fs_game_history, fs_logs, fs_current_signal, fs_cooldown_results, fs_session_token
+        global game_history, logs, current_signal, cooldown_results, session_token, signal_strategy_map, resolved_signals, current_tie_watch, tie_watch_registry, session_start_time
+        global fs_game_history, fs_logs, fs_current_signal, fs_cooldown_results, fs_session_token, fs_signal_strategy_map
         game_history.clear()
         logs.clear()
         current_signal = None
         cooldown_results = 0
         session_token = str(int(time.time()))
+        session_start_time = time.time()
+        signal_strategy_map = {}
+        resolved_signals = []
+        current_tie_watch = None
+        tie_watch_registry = {}
         fs_game_history.clear()
         fs_logs.clear()
         fs_current_signal = None
         fs_cooldown_results = 0
         fs_session_token = str(int(time.time())) + "_fs"
+        fs_signal_strategy_map = {}
         return {"success": True, "message": "Login bem sucedido"}
     raise HTTPException(status_code=401, detail="Credenciais inválidas")
 
@@ -710,10 +919,29 @@ def evaluate_triggers(history: List[Dict], triggers: List[Dict]) -> List[Dict]:
 
 
 async def run_analysis():
-    global current_signal, logs, last_signal_strategy
+    global current_signal, logs, last_signal_strategy, current_tie_watch, tie_watch_registry
 
     if len(game_history) < 5:
         return {"signal": None, "reason": "Aguardando mais resultados"}
+
+    # Empate Seco 🟡 — independente do sinal de cor, roda sempre que houver resultado novo
+    tw = analyze_tie_watch(game_history)
+    current_tie_watch = None
+    if tw["active"]:
+        watch_id = f"tiewatch_{int(time.time()*1000)}"
+        last = game_history[-1]
+        number = last.get("player") if last.get("winner") in ("Player", "Tie") else last.get("banker")
+        current_tie_watch = {
+            "id": watch_id,
+            "number": number,
+            "alerts": tw["alerts"],
+        }
+        tie_watch_registry[watch_id] = current_tie_watch
+        logs.append({
+            "type": "analysis",
+            "message": "🟡 Empate Seco ativo: " + " | ".join(a["reason"] for a in tw["alerts"]),
+            "timestamp": "now"
+        })
 
     # LOCK: sinal ativo não resolvido → não gera novo
     if current_signal is not None:
@@ -775,6 +1003,7 @@ async def run_analysis():
             "priority": priority,
             "source": "Estatística"
         }
+        signal_strategy_map[current_signal["id"]] = analysis["strategy"]
         logs.append({
             "type": "signal",
             "message": f"{'⚡ FORTE' if priority else 'SINAL'}: {analysis['signal']} ({analysis['probability']}%)",
@@ -798,13 +1027,14 @@ async def run_analysis():
         "patterns": dict(list(patterns.items())[:10]),
         "percentages": percentages,
         "tie_warning": tie_warning,
-        "priority": priority
+        "priority": priority,
+        "current_tie_watch": current_tie_watch
     }
 
 @api_router.get("/state")
 async def get_state():
     global game_history, stats, logs, current_signal, cooldown_results
-    global strategy_stats, last_signal_strategy, last_activity
+    global strategy_stats, last_signal_strategy, last_activity, current_tie_watch, tie_watch_registry, resolved_signals, session_start_time
     # Auto-reset se passou mais de AUTO_RESET_MINUTES sem atividade
     elapsed = (time.time() - last_activity) / 60
     if elapsed > AUTO_RESET_MINUTES and len(game_history) > 0:
@@ -814,6 +1044,10 @@ async def get_state():
         current_signal = None
         cooldown_results = 0
         last_signal_strategy = None
+        current_tie_watch = None
+        tie_watch_registry = {}
+        resolved_signals = []
+        session_start_time = time.time()
         for k in strategy_stats:
             strategy_stats[k] = {"wins": 0, "losses": 0, "total": 0}
         logs.append({"type": "system", "message": f"🔄 Reset automático após {int(elapsed)}min de inatividade", "timestamp": "now"})
@@ -841,6 +1075,9 @@ async def get_state():
         "tie_warning": percentages.get("Tie", 0) >= 7,
         "trigger_results": trigger_results,
         "session_token": session_token,
+        "resolved_signals": resolved_signals[-100:],
+        "current_tie_watch": current_tie_watch,
+        "session_start_time": session_start_time,
     }
 
 @api_router.post("/strategy")
@@ -881,8 +1118,19 @@ async def change_probability(request: Request):
 @api_router.post("/signal/feedback")
 async def signal_feedback(request: Request):
     data = await request.json()
-    global stats, pattern_weights, active_strategy, strategy_stats, last_signal_strategy, current_signal
+    global stats, pattern_weights, active_strategy, strategy_stats, last_signal_strategy, current_signal, signal_strategy_map, resolved_signals, current_tie_watch, tie_watch_registry
     current_signal = None  # libera o lock — sinal resolvido
+
+    signal_id = data.get("signal_id")
+
+    # Trava anti-duplicidade: se esse signal_id já foi contabilizado (ou nunca existiu), ignora
+    if signal_id is not None and signal_id not in signal_strategy_map:
+        return {"success": True, "stats": stats, "strategy_stats": strategy_stats, "duplicate": True}
+
+    # Estratégia exata que gerou ESSE sinal (não depende de variável global que pode ter mudado)
+    strat = signal_strategy_map.pop(signal_id, None) if signal_id else (last_signal_strategy or active_strategy)
+    if not strat:
+        strat = last_signal_strategy or active_strategy
 
     if data.get("result") == "win":
         stats["wins"] += 1
@@ -891,13 +1139,54 @@ async def signal_feedback(request: Request):
     stats["total_signals"] += 1
 
     # Atualiza placar da estratégia que gerou o sinal
-    strat = last_signal_strategy or active_strategy
     if strat in strategy_stats:
         strategy_stats[strat]["total"] += 1
         if data.get("result") == "win":
             strategy_stats[strat]["wins"] += 1
         else:
             strategy_stats[strat]["losses"] += 1
+
+    # Se esse sinal venceu por causa de um Empate, e tinha um Empate Seco pendente
+    # NO MESMO ROUND, resolve ele aqui também — mas SEM contar de novo no
+    # placar (o placar já subiu acima). Usa o ID exato que o FRONT mandou
+    # (não o ponteiro global current_tie_watch, que já pode ter avançado pro
+    # próximo round antes desse feedback chegar — era a causa da contagem dupla).
+    tie_watch_id = data.get("tie_watch_id")
+    if data.get("actual_winner") == "Tie" and tie_watch_id and tie_watch_id in tie_watch_registry:
+        auto_watch = tie_watch_registry.pop(tie_watch_id)
+        if current_tie_watch and current_tie_watch.get("id") == tie_watch_id:
+            current_tie_watch = None
+        auto_number = auto_watch.get("number")
+        auto_source = " + ".join(sorted(set(a["source"] for a in auto_watch.get("alerts", []))))
+        auto_detail = " | ".join(a["reason"] for a in auto_watch.get("alerts", []))
+        resolved_signals.append({
+            "id": tie_watch_id,
+            "kind": "tie_watch",
+            "strategy": f"Empate Seco ({auto_source})" if auto_source else "Empate Seco",
+            "result": "win",
+            "gale": 0,
+            "actual_winner": "Tie",
+            "number": auto_number,
+            "multiplier": get_tie_multiplier(auto_number),
+            "detail": auto_detail,
+            "counted_in_stats": False,
+            "timestamp": now_hm()
+        })
+
+    # Detalhe clicável: como o sinal foi resolvido (direto/G1, e se veio de Empate)
+    resolved_signals.append({
+        "id": signal_id or f"resolved_{int(time.time()*1000)}",
+        "strategy": strat,
+        "entry_signal": data.get("entry_signal"),      # Player/Banker que a entrada pedia
+        "result": data.get("result"),                  # win/loss
+        "gale": data.get("gale", 0),                    # 0 = direto, 1 = venceu/perdeu no G1
+        "actual_winner": data.get("actual_winner"),      # Player/Banker/Tie do resultado real
+        "player": data.get("player"),
+        "banker": data.get("banker"),
+        "timestamp": now_hm()
+    })
+    if len(resolved_signals) > 50:
+        resolved_signals = resolved_signals[-200:]
 
     logs.append({
         "type": "feedback",
@@ -922,6 +1211,64 @@ async def signal_feedback(request: Request):
     cooldown_results = 2
 
     return {"success": True, "stats": stats, "strategy_stats": strategy_stats}
+
+
+@api_router.post("/tiewatch/feedback")
+async def tiewatch_feedback(request: Request):
+    """
+    Resolve o Empate Seco 🟡. Só entra no placar geral quando BATE (win).
+    Se não bater, fica registrado no histórico mas NÃO mexe no placar.
+    Nunca entra no placar por estratégia (strategy_stats) — pra não
+    bagunçar a auto-seleção de estratégia de cor.
+    """
+    data = await request.json()
+    global stats, resolved_signals, current_tie_watch, tie_watch_registry
+
+    watch_id = data.get("watch_id")
+    if not watch_id or watch_id not in tie_watch_registry:
+        return {"success": True, "stats": stats, "duplicate": True}
+
+    watch = tie_watch_registry.pop(watch_id)
+    if current_tie_watch and current_tie_watch.get("id") == watch_id:
+        current_tie_watch = None
+
+    result = data.get("result")  # win/loss
+    number = watch.get("number")
+    multiplier = data.get("multiplier") or get_tie_multiplier(number)
+    source = " + ".join(sorted(set(a["source"] for a in watch.get("alerts", []))))
+    detail = " | ".join(a["reason"] for a in watch.get("alerts", []))
+
+    # Empate Seco só entra no placar E no histórico quando BATE (win).
+    # Se não bater, não mexe no placar e nem aparece no histórico de sinais.
+    counted = False
+    if result == "win":
+        stats["wins"] += 1
+        stats["total_signals"] += 1
+        counted = True
+
+        resolved_signals.append({
+            "id": watch_id,
+            "kind": "tie_watch",
+            "strategy": f"Empate Seco ({source})" if source else "Empate Seco",
+            "result": result,
+            "gale": 0,
+            "actual_winner": "Tie",
+            "number": number,
+            "multiplier": multiplier,
+            "detail": detail,
+            "counted_in_stats": counted,
+            "timestamp": now_hm()
+        })
+        if len(resolved_signals) > 200:
+            resolved_signals = resolved_signals[-200:]
+
+    logs.append({
+        "type": "feedback",
+        "message": f"{'✅ EMPATE SECO BATEU' if result == 'win' else '❌ Empate Seco não bateu'} (número {number}{f', {multiplier}x' if multiplier else ''})",
+        "timestamp": "now"
+    })
+
+    return {"success": True, "stats": stats}
 
 
 def _strategy_rate(strat: str) -> float:
@@ -971,16 +1318,22 @@ async def toggle_auto_select(request: Request):
 
 @api_router.post("/reset")
 async def reset_stats():
-    global stats, logs, strategy_stats, current_signal, cooldown_results
+    global stats, logs, strategy_stats, current_signal, cooldown_results, signal_strategy_map, resolved_signals, current_tie_watch, tie_watch_registry, session_start_time
 
     stats = {"wins": 0, "losses": 0, "total_signals": 0}
     strategy_stats = {
         "adaptive":  {"wins": 0, "losses": 0, "total": 0},
-        "pressure":  {"wins": 0, "losses": 0, "total": 0},
+        "number":    {"wins": 0, "losses": 0, "total": 0},
+        "number_pro":{"wins": 0, "losses": 0, "total": 0},
         "consensus": {"wins": 0, "losses": 0, "total": 0},
     }
     current_signal = None
+    signal_strategy_map = {}
+    resolved_signals = []
+    current_tie_watch = None
+    tie_watch_registry = {}
     cooldown_results = 0
+    session_start_time = time.time()
     logs.append({
         "type": "reset",
         "message": "Estatísticas resetadas",
@@ -1012,6 +1365,7 @@ fs_strategy_stats: Dict[str, Dict] = {
     "fluxo":     {"wins": 0, "losses": 0, "total": 0},
 }
 fs_last_signal_strategy: Optional[str] = None
+fs_signal_strategy_map: Dict[str, str] = {}
 fs_cooldown_results: int = 0
 fs_last_activity: float = time.time()
 fs_session_token: str = str(int(time.time())) + "_fs"
@@ -1081,6 +1435,7 @@ async def fs_run_analysis():
             "priority": priority,
             "source": "Estatística",
         }
+        fs_signal_strategy_map[fs_current_signal["id"]] = analysis["strategy"]
         label = _fs_translate_signal(analysis["signal"])
         fs_logs.append({"type": "signal", "message": f"{'⚡ FORTE' if priority else 'SINAL'}: {label} ({analysis['probability']}%)", "timestamp": "now"})
     else:
@@ -1199,14 +1554,22 @@ async def fs_change_probability(request: Request):
 @fs_router.post("/signal/feedback")
 async def fs_signal_feedback(request: Request):
     data = await request.json()
-    global fs_stats, fs_strategy_stats, fs_last_signal_strategy, fs_current_signal, fs_active_strategy, fs_auto_select, fs_cooldown_results
+    global fs_stats, fs_strategy_stats, fs_last_signal_strategy, fs_current_signal, fs_active_strategy, fs_auto_select, fs_cooldown_results, fs_signal_strategy_map
     fs_current_signal = None
+
+    signal_id = data.get("signal_id")
+    if signal_id is not None and signal_id not in fs_signal_strategy_map:
+        return {"success": True, "stats": fs_stats, "duplicate": True}
+
+    strat = fs_signal_strategy_map.pop(signal_id, None) if signal_id else None
+    if not strat:
+        strat = fs_last_signal_strategy or fs_active_strategy
+
     if data.get("result") == "win":
         fs_stats["wins"] += 1
     else:
         fs_stats["losses"] += 1
     fs_stats["total_signals"] += 1
-    strat = fs_last_signal_strategy or fs_active_strategy
     if strat in fs_strategy_stats:
         fs_strategy_stats[strat]["total"] += 1
         if data.get("result") == "win":
@@ -1248,7 +1611,7 @@ async def fs_set_seq_min(request: Request):
 
 @fs_router.post("/reset")
 async def fs_reset_stats():
-    global fs_stats, fs_logs, fs_strategy_stats, fs_current_signal, fs_cooldown_results
+    global fs_stats, fs_logs, fs_strategy_stats, fs_current_signal, fs_cooldown_results, fs_signal_strategy_map
     fs_stats = {"wins": 0, "losses": 0, "total_signals": 0}
     fs_strategy_stats = {
         "adaptive":  {"wins": 0, "losses": 0, "total": 0},
@@ -1256,6 +1619,7 @@ async def fs_reset_stats():
         "consensus": {"wins": 0, "losses": 0, "total": 0},
     }
     fs_current_signal = None
+    fs_signal_strategy_map = {}
     fs_cooldown_results = 0
     fs_logs.append({"type": "reset", "message": "FS Estatísticas resetadas", "timestamp": "now"})
     return {"success": True}

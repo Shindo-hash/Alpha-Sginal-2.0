@@ -12,7 +12,7 @@ export default function GameSelect() {
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-[#050505] p-4">
+    <div className="min-h-screen flex items-center justify-center bg-[#14171c] p-4">
       <div className="w-full max-w-lg">
         <div className="text-center mb-10 animate-fadeIn">
           <div className="flex items-center justify-center gap-2 mb-3">
@@ -36,7 +36,7 @@ export default function GameSelect() {
               Bac Bo
             </h2>
             <p className="text-sm text-muted-foreground mt-1">Player · Banker · Tie</p>
-            <p className="text-xs text-player mt-4 font-medium">Estratégias: Adaptativo 🧠 · Pressure · Consenso ⚡</p>
+            <p className="text-xs text-player mt-4 font-medium">Estratégias: Adaptativo 🧠 · Número 🎲 · Número PRO 🎲 · Consenso ⚡</p>
           </button>
 
           <button

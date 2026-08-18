@@ -6,24 +6,24 @@
 
 @layer base {
   :root {
-    --background: 0 0% 2%;
-    --foreground: 0 0% 98%;
-    --card: 0 0% 4%;
-    --card-foreground: 0 0% 98%;
-    --popover: 0 0% 4%;
-    --popover-foreground: 0 0% 98%;
+    --background: 222 16% 8%;
+    --foreground: 210 20% 96%;
+    --card: 222 16% 12%;
+    --card-foreground: 210 20% 96%;
+    --popover: 222 16% 12%;
+    --popover-foreground: 210 20% 96%;
     --primary: 187 100% 50%;
     --primary-foreground: 0 0% 0%;
-    --secondary: 0 0% 10%;
-    --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 10%;
-    --muted-foreground: 0 0% 60%;
-    --accent: 0 0% 10%;
-    --accent-foreground: 0 0% 98%;
+    --secondary: 222 14% 16%;
+    --secondary-foreground: 210 20% 96%;
+    --muted: 222 14% 16%;
+    --muted-foreground: 220 10% 68%;
+    --accent: 222 14% 18%;
+    --accent-foreground: 210 20% 96%;
     --destructive: 348 100% 50%;
     --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 15%;
-    --input: 0 0% 15%;
+    --border: 222 12% 24%;
+    --input: 222 12% 24%;
     --ring: 187 100% 50%;
     --radius: 0.25rem;
     --chart-1: 187 100% 50%;
@@ -40,7 +40,7 @@
   }
   body {
     @apply bg-background text-foreground font-body;
-    background-color: #050505;
+    background-color: #14171c;
   }
 }
 
@@ -51,16 +51,16 @@
 }
 
 ::-webkit-scrollbar-track {
-  background: #0A0A0A;
+  background: #14171c;
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #1F1F1F;
+  background: #2a2f38;
   border-radius: 3px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #333;
+  background: #3a4049;
 }
 
 /* Glow utilities */
@@ -94,9 +94,10 @@
 
 /* Glass effect */
 .glass {
-  background: rgba(10, 10, 10, 0.7);
-  backdrop-filter: blur(12px);
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(30, 34, 41, 0.55);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.09);
 }
 
 /* Pulse animation for signals */

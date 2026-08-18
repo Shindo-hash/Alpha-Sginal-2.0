@@ -13,8 +13,8 @@ module.exports = {
         player: "#00F0FF",
         banker: "#FF003C",
         tie: "#FFE600",
-        surface: "#0A0A0A",
-        "surface-highlight": "#121212",
+        surface: "#14171c",
+        "surface-highlight": "#1c2027",
         primary: {
           DEFAULT: "hsl(var(--primary))",
           foreground: "hsl(var(--primary-foreground))",

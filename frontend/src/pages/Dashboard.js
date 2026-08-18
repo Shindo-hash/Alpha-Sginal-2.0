@@ -1,11 +1,11 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
 import { useAuth } from "../App";
 import { useNavigate } from "react-router-dom";
 import axios from "axios";
 import { toast } from "sonner";
 import {
   Zap, LogOut, RotateCcw, ExternalLink, Volume2, VolumeX,
-  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw,
+  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw, CheckCircle2,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Slider } from "../components/ui/slider";
@@ -78,6 +78,46 @@ const OUTCOME_STYLES = {
   empate:    { bg: "#a16207", border: "#eab308", glow: "#eab308", textClass: "neon-tie",     borderClass: "border-tie/50",    glowClass: "glow-tie"     },
 };
 
+// Tabela de multiplicador de Empate no Bac Bo, por número do dado vencedor (2-12)
+const TIE_MULTIPLIER_TABLE = {
+  6: 4, 7: 4, 8: 4,
+  5: 6, 9: 6,
+  4: 10, 10: 10,
+  3: 25, 11: 25,
+  2: 88, 12: 88,
+};
+const getTieMultiplier = (number) => TIE_MULTIPLIER_TABLE[number] ?? null;
+
+// ============================================================
+// Estabilização de referência — o backend manda um array/objeto NOVO a
+// cada poll (500ms) mesmo quando o conteúdo é idêntico. Sem isso, useMemo
+// e React.memo não conseguem economizar nada (comparam por referência).
+// Aqui a gente reaproveita a referência antiga quando o conteúdo é igual,
+// pra que os componentes memoizados realmente pulem o redesenho.
+// ============================================================
+function stabilizeArray(ref, newArr, keyFn) {
+  const prev = ref.current;
+  const arr = newArr || [];
+  if (prev && prev.length === arr.length) {
+    let same = true;
+    for (let i = 0; i < arr.length; i++) {
+      if (keyFn(prev[i], i) !== keyFn(arr[i], i)) { same = false; break; }
+    }
+    if (same) return prev;
+  }
+  ref.current = arr;
+  return arr;
+}
+
+function stabilizeObject(ref, newObj) {
+  const prev = ref.current;
+  const str = JSON.stringify(newObj);
+  if (prev && prev.str === str) return prev.value;
+  const stable = { str, value: newObj };
+  ref.current = stable;
+  return newObj;
+}
+
 // Sound utilities
 const playSound = (type) => {
   const audioContext = new (window.AudioContext || window.webkitAudioContext)();
@@ -109,6 +149,16 @@ const playSound = (type) => {
       oscillator.start();
       oscillator.stop(audioContext.currentTime + 0.15);
       break;
+    case "tie_watch":
+      // Som próprio do Empate Seco: dois bipes curtos e agudos (diferente do win normal)
+      oscillator.frequency.setValueAtTime(1046.5, audioContext.currentTime);
+      oscillator.frequency.setValueAtTime(0, audioContext.currentTime + 0.08);
+      oscillator.frequency.setValueAtTime(1046.5, audioContext.currentTime + 0.15);
+      oscillator.type = "square";
+      gainNode.gain.setValueAtTime(0.15, audioContext.currentTime);
+      oscillator.start();
+      oscillator.stop(audioContext.currentTime + 0.25);
+      break;
     default: break;
   }
 };
@@ -116,49 +166,90 @@ const playSound = (type) => {
 // ============================================================
 // BigRoad
 // ============================================================
-const BigRoad = ({ history, gc }) => {
+const BigRoad = memo(({ history, gc }) => {
   const ROWS = 6;
   const isFS = !!gc.apiPrefix;
+  const [hoveredValue, setHoveredValue] = useState(null);
+
+  // Só recalcula as bolinhas quando o histórico realmente muda (não a cada poll de 500ms)
+  const { cells, grid, lastCellIdx } = useMemo(() => {
+    const cells = [];
+    history.forEach((result) => {
+      const outcome = gc.getOutcome(result.winner);
+      const isTie = outcome === "tie" || outcome === "empate";
+
+      if (isTie) {
+        if (isFS) {
+          cells.push({ winner: result.winner, outcome, value: "E", count: 1 });
+        } else {
+          const val = result.player ?? 0;
+          cells.push({ winner: result.winner, outcome, value: val, count: 1 });
+        }
+      } else {
+        let value;
+        if (isFS) {
+          value = (outcome === "visitante") ? "V" : "C";
+        } else {
+          value = (outcome === "player")
+            ? (result.player ?? 0)
+            : (result.banker ?? 0);
+        }
+        cells.push({ winner: result.winner, outcome, value, count: 1 });
+      }
+    });
+
+    const totalCols = Math.ceil(cells.length / ROWS);
+    const grid = Array.from({ length: totalCols }, (_, c) => cells.slice(c * ROWS, c * ROWS + ROWS));
+    return { cells, grid, lastCellIdx: cells.length - 1 };
+  }, [history, isFS, gc]);
+
+  // Highlight de "puxada": passa o mouse num número e ilumina todas as outras
+  // vezes que ele saiu (dourado) + o resultado que veio logo depois de cada uma.
+  // Também memoizado — só recalcula quando muda o número passado no mouse ou o histórico.
+  const { sourceIdx, pulledOutcome, pulledCounts, totalPulls } = useMemo(() => {
+    const sourceIdx = new Set();
+    const pulledOutcome = {};
+    const pulledCounts = { player: 0, banker: 0, tie: 0, empate: 0 };
+    if (hoveredValue !== null && !isFS) {
+      cells.forEach((c, i) => {
+        if (c.value === hoveredValue) {
+          sourceIdx.add(i);
+          const next = cells[i + 1];
+          if (next) {
+            pulledOutcome[i + 1] = next.outcome;
+            pulledCounts[next.outcome] = (pulledCounts[next.outcome] || 0) + 1;
+          }
+        }
+      });
+    }
+    const totalPulls = pulledCounts.player + pulledCounts.banker + (pulledCounts.tie || 0) + (pulledCounts.empate || 0);
+    return { sourceIdx, pulledOutcome, pulledCounts, totalPulls };
+  }, [cells, hoveredValue, isFS]);
 
   if (history.length === 0) {
     return <p className="text-muted-foreground text-sm py-4">Aguardando resultados da extensão...</p>;
   }
 
-  const cells = [];
-  history.forEach((result) => {
-    const outcome = gc.getOutcome(result.winner);
-    const isTie = outcome === "tie" || outcome === "empate";
-
-    if (isTie) {
-      if (isFS) {
-        // FS: cada Tie individual, sem acumular
-        cells.push({ winner: result.winner, outcome, value: "E", count: 1 });
-      } else {
-        // BacBo: cada Tie individual com seu placar
-        const val = result.player ?? 0;
-        cells.push({ winner: result.winner, outcome, value: val, count: 1 });
-      }
-    } else {
-      let value;
-      if (isFS) {
-        // FS: mostra só a letra C ou V
-        value = (outcome === "visitante") ? "V" : "C";
-      } else {
-        // BacBo: mostra o placar numérico
-        value = (outcome === "player")
-          ? (result.player ?? 0)
-          : (result.banker ?? 0);
-      }
-      cells.push({ winner: result.winner, outcome, value, count: 1 });
-    }
-  });
-
-  const totalCols = Math.ceil(cells.length / ROWS);
-  const grid = Array.from({ length: totalCols }, (_, c) => cells.slice(c * ROWS, c * ROWS + ROWS));
-  const lastCellIdx = cells.length - 1;
-
   return (
-    <div className="overflow-x-auto" data-testid="history-grid">
+    <div data-testid="history-grid">
+      {!isFS && (
+        <p className="text-xs text-muted-foreground mb-2 h-4 truncate">
+          {hoveredValue !== null && sourceIdx.size > 0 ? (
+            <>
+              Número <span className="font-bold text-white">{hoveredValue}</span> apareceu {sourceIdx.size}x
+              {totalPulls > 0 && (
+                <> → puxou <span className="text-player font-semibold">{pulledCounts.player || 0}x Player</span>,{" "}
+                <span className="text-banker font-semibold">{pulledCounts.banker || 0}x Banker</span>
+                {(pulledCounts.tie || pulledCounts.empate) ? <>, <span className="text-tie font-semibold">{(pulledCounts.tie || 0) + (pulledCounts.empate || 0)}x Empate</span></> : null}
+                </>
+              )}
+            </>
+          ) : (
+            <>&nbsp;</>
+          )}
+        </p>
+      )}
+      <div className="overflow-x-auto">
       <div className="inline-flex gap-px" style={{ background: "rgba(255,255,255,0.03)", borderRadius: 6, padding: 3 }}>
         {grid.map((col, colIdx) => (
           <div key={colIdx} className="flex flex-col gap-px">
@@ -197,6 +288,8 @@ const BigRoad = ({ history, gc }) => {
                 <div key={rowIdx} style={{ width: 28, height: 28 }}>
                   <div
                     title={`${cell.winner}: ${cell.value}`}
+                    onMouseEnter={() => !isFS && setHoveredValue(cell.value)}
+                    onMouseLeave={() => !isFS && setHoveredValue(null)}
                     style={{
                       width: 27, height: 27,
                       borderRadius: "50%",
@@ -205,6 +298,7 @@ const BigRoad = ({ history, gc }) => {
                       background: style.bg,
                       border: `1.5px solid ${style.border}`,
                       boxShadow: isLatest ? `0 0 6px ${style.glow}` : "none",
+                      cursor: "pointer",
                     }}
                   >
                     {cell.value}
@@ -215,9 +309,10 @@ const BigRoad = ({ history, gc }) => {
           </div>
         ))}
       </div>
+      </div>
     </div>
   );
-};
+});
 
 const StatCard = ({ label, value, color = "text-white" }) => (
   <div className="glass rounded p-3" data-testid={`stat-${label.toLowerCase()}`}>
@@ -295,7 +390,7 @@ const SignalCard = ({ signal, onFeedback, soundEnabled, galeCount = 0, gc }) => 
 // ============================================================
 // PatternHeatmap
 // ============================================================
-const PatternHeatmap = ({ patterns, triggerResults = [], gc }) => {
+const PatternHeatmap = memo(({ patterns, triggerResults = [], gc }) => {
   const hasPatterns = patterns && Object.keys(patterns).length > 0;
   const hasTriggers = triggerResults.filter((t) => t.active && t.total > 0).length > 0;
 
@@ -305,7 +400,11 @@ const PatternHeatmap = ({ patterns, triggerResults = [], gc }) => {
 
   const sortedPatterns = hasPatterns
     ? Object.entries(patterns)
-        .sort((a, b) => Math.max(b[1].Player, b[1].Banker) - Math.max(a[1].Player, a[1].Banker))
+        .sort((a, b) => {
+          const diff = Math.max(b[1].Player, b[1].Banker) - Math.max(a[1].Player, a[1].Banker);
+          if (diff !== 0) return diff;
+          return a[0].localeCompare(b[0]); // desempate estável — mesma ordem sempre, sem "pular"
+        })
         .slice(0, 8)
     : [];
 
@@ -393,25 +492,26 @@ const PatternHeatmap = ({ patterns, triggerResults = [], gc }) => {
       )}
     </div>
   );
-};
+});
 
 // ============================================================
 // StrategySelector
 // ============================================================
-const StrategySelector = ({ active, onChange, strategyStats = {}, autoSelect = false, isFS = false, seqMin, onSeqMinChange }) => {
+const StrategySelector = memo(({ active, onChange, strategyStats = {}, autoSelect = false, isFS = false, seqMin, onSeqMinChange }) => {
   const allStrategies = [
     { id: "adaptive",    name: "Adaptativo 🧠", desc: "Mais sinais",          tooltip: "Analisa o padrão dos últimos 3 resultados." },
-    { id: "pressure",    name: "Pressure",       desc: "Mais certeiro",        tooltip: "Aguarda sequência de 4+ iguais e aposta na reversão." },
+    { id: "number",      name: "Número 🎲",      desc: "Sozinho",              tooltip: "Vê o que o número do dado vencedor (2-12) costuma puxar em seguida." },
+    { id: "number_pro",  name: "Número PRO 🎲",  desc: "Consenso numérico",    tooltip: "Igual à Número, mas só sinaliza se o Adaptativo concordar com a mesma cor." },
     { id: "consensus",   name: "Consenso ⚡",    desc: "Equilíbrio ideal",     tooltip: "Combina 3 estratégias, sinaliza só quando 2/3 concordam." },
     { id: "sequential",  name: "Fluxo 🌊",       desc: "Sequência + retorno",  tooltip: "Ignora Empates, detecta sequência de N+ iguais e aposta na cor principal voltar após alternância." },
     { id: "alternancia", name: "Alternância 🔁", desc: "Ping-pong + Duplas",   tooltip: "Detecta ritmo da mesa: alternância 1x1 (P→B→P) ou duplas 2x2 (PP→BB→PP)." },
   ];
 
-  // BacBo: Adaptativo, Pressure, Consenso
+  // BacBo: Adaptativo, Número, Número PRO, Consenso
   // FS: Adaptativo, Fluxo, Alternância
   const strategies = isFS
     ? allStrategies.filter(s => ["adaptive", "sequential", "alternancia"].includes(s.id))
-    : allStrategies.filter(s => ["adaptive", "pressure", "consensus"].includes(s.id));
+    : allStrategies.filter(s => ["adaptive", "number", "number_pro", "consensus"].includes(s.id));
 
   const getRate = (id) => {
     const s = strategyStats[id];
@@ -468,9 +568,9 @@ const StrategySelector = ({ active, onChange, strategyStats = {}, autoSelect = f
       )}
     </div>
   );
-};
+});
 
-const LogItem = ({ log }) => {
+const LogItem = memo(({ log }) => {
   const typeColors = {
     signal: "text-player", result: "text-white", info: "text-muted-foreground",
     config: "text-tie", feedback: "text-green-400", analysis: "text-muted-foreground",
@@ -482,7 +582,226 @@ const LogItem = ({ log }) => {
       <p className={`text-xs ${typeColors[log.type] || "text-white"}`}>{log.message}</p>
     </div>
   );
+});
+
+// ============================================================
+// ResolvedSignalsPanel — cards clicáveis: Direto/G1, e Empate mostra número + multiplicador
+// + botão "Ver Histórico Completo" com placar geral e por estratégia
+// ============================================================
+const ResolvedItemDetail = ({ s }) => {
+  const isWin = s.result === "win";
+  const isTieKind = s.kind === "tie_watch";
+  const isColorTieWin = !isTieKind && isWin && s.actual_winner === "Tie";
+  const number = isTieKind ? s.number : (s.player ?? s.banker);
+  const multiplier = isTieKind ? s.multiplier : (isColorTieWin ? getTieMultiplier(number) : null);
+
+  return (
+    <div className="pb-2 px-1 text-xs text-muted-foreground space-y-1 animate-fadeIn">
+      {!isTieKind && <p>{s.gale === 0 ? "Direto (sem Gale)" : "No G1 (entrada repetida)"}</p>}
+      {isTieKind && <p>{s.detail}</p>}
+      {(isColorTieWin || (isTieKind && isWin)) && (
+        <p className="text-tie font-semibold">
+          🟡 Empate no número {number} — multiplicador {multiplier ? `${multiplier}x` : "desconhecido"}
+        </p>
+      )}
+      {isTieKind && s.counted_in_stats === false && (
+        <p className="text-muted-foreground italic">Não contou no placar (o sinal de cor já contou esse Empate)</p>
+      )}
+    </div>
+  );
 };
+
+const ResolvedSignalRow = ({ s, isOpen, onToggle }) => {
+  const isWin = s.result === "win";
+  const isTieKind = s.kind === "tie_watch";
+  const isColorTieWin = !isTieKind && isWin && s.actual_winner === "Tie";
+  return (
+    <div className="border-b border-white/5 last:border-0">
+      <button
+        onClick={onToggle}
+        className="w-full flex items-center justify-between py-2 text-left hover:bg-white/5 rounded px-1 transition-colors"
+        data-testid={`resolved-signal-${s.id}`}
+      >
+        <span className={`text-xs font-semibold flex items-center gap-1.5 flex-wrap ${isWin ? "text-green-400" : "text-banker"}`}>
+          {isWin ? "✅ WIN" : "❌ LOSS"} <span className="text-muted-foreground font-normal">({s.strategy})</span>
+          {isTieKind && (
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-tie/20 text-tie">EMPATE SECO</span>
+          )}
+          {isColorTieWin && (
+            <span className="text-[9px] font-bold px-1.5 py-0.5 rounded bg-tie/20 text-tie">EMPATE NO SINAL</span>
+          )}
+        </span>
+        <span className="flex items-center gap-2 shrink-0">
+          {s.timestamp && s.timestamp !== "now" && (
+            <span className="text-[10px] text-muted-foreground font-mono">{s.timestamp}</span>
+          )}
+          <ChevronRight className={`w-3 h-3 text-muted-foreground transition-transform ${isOpen ? "rotate-90" : ""}`} />
+        </span>
+      </button>
+      {isOpen && <ResolvedItemDetail s={s} />}
+    </div>
+  );
+};
+
+const FullHistoryModal = ({ signals, stats, strategyStats, sessionStartTime, onClose }) => {
+  const [openId, setOpenId] = useState(null);
+  const [tab, setTab] = useState("all");
+  const winRate = stats.total_signals > 0 ? Math.round((stats.wins / stats.total_signals) * 100) : 0;
+  const strategyLabels = { adaptive: "Adaptativo", number: "Número", number_pro: "Número PRO", consensus: "Consenso" };
+
+  const colorSignals = signals.filter(s => s.kind !== "tie_watch");
+  const tieSignals = signals.filter(s => s.kind === "tie_watch"); // só wins (backend não loga loss aqui)
+  const filtered = tab === "color" ? colorSignals : tab === "tie" ? tieSignals : signals;
+
+  // Como os wins de cor costumam vencer — ajuda a saber se dá pra ir direto ou se costuma precisar de G1
+  const colorWins = colorSignals.filter(s => s.result === "win");
+  const winsEmpate = colorWins.filter(s => s.actual_winner === "Tie").length;
+  const winsDireto = colorWins.filter(s => s.actual_winner !== "Tie" && s.gale === 0).length;
+  const winsG1 = colorWins.filter(s => s.actual_winner !== "Tie" && s.gale > 0).length;
+
+  // Tempo de mesa e ritmo de sinais — ajuda a decidir quanto tempo ficar jogando
+  const elapsedMin = sessionStartTime ? Math.max(1, Math.round((Date.now() / 1000 - sessionStartTime) / 60)) : null;
+  const elapsedLabel = elapsedMin ? (elapsedMin >= 60 ? `${Math.floor(elapsedMin / 60)}h${elapsedMin % 60}min` : `${elapsedMin}min`) : "—";
+  const signalsPerMin = elapsedMin ? (signals.length / elapsedMin).toFixed(2) : "—";
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-3 overflow-hidden" style={{ background: "rgba(0,0,0,0.75)" }} onClick={onClose} data-testid="full-history-page">
+      {/* Tamanho fixo em telas grandes, responsivo em telas pequenas — nunca estoura a viewport */}
+      <div
+        className="glass rounded-lg flex flex-col w-full sm:w-[600px] max-w-[600px]"
+        style={{ height: "82vh", maxHeight: 820 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Cabeçalho fixo */}
+        <div className="flex items-center justify-between p-4 border-b border-white/10 shrink-0">
+          <div>
+            <h2 className="font-heading font-bold text-lg flex items-center gap-2">
+              <CheckCircle2 className="w-5 h-5 text-green-400 shrink-0" />
+              Histórico Completo
+            </h2>
+            <p className="text-xs text-muted-foreground mt-0.5">
+              ⏱ Mesa há {elapsedLabel} · {signalsPerMin} sinais/min
+            </p>
+          </div>
+          <Button variant="outline" size="sm" onClick={onClose} data-testid="close-full-history-btn" className="shrink-0">
+            ✕ Fechar
+          </Button>
+        </div>
+
+        {/* Corpo com scroll único */}
+        <div className="flex-1 overflow-y-auto overflow-x-hidden p-4">
+          {/* Placar geral */}
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 mb-3">
+            <div className="glass rounded p-2 text-center min-w-0">
+              <p className="text-[10px] text-muted-foreground uppercase truncate">Wins</p>
+              <p className="text-xl font-mono font-bold text-green-400">{stats.wins}</p>
+            </div>
+            <div className="glass rounded p-2 text-center min-w-0">
+              <p className="text-[10px] text-muted-foreground uppercase truncate">Losses</p>
+              <p className="text-xl font-mono font-bold text-banker">{stats.losses}</p>
+            </div>
+            <div className="glass rounded p-2 text-center min-w-0">
+              <p className="text-[10px] text-muted-foreground uppercase truncate">Total</p>
+              <p className="text-xl font-mono font-bold text-white">{stats.total_signals}</p>
+            </div>
+            <div className="glass rounded p-2 text-center min-w-0">
+              <p className="text-[10px] text-muted-foreground uppercase truncate">Taxa</p>
+              <p className="text-xl font-mono font-bold text-player">{winRate}%</p>
+            </div>
+          </div>
+
+          {/* Placar por estratégia de cor */}
+          <div className="mb-3">
+            <p className="text-xs text-muted-foreground mb-1">Por estratégia:</p>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
+              {Object.entries(strategyStats || {}).map(([key, s]) => {
+                const rate = s.total > 0 ? Math.round((s.wins / s.total) * 100) : 0;
+                return (
+                  <div key={key} className="glass rounded p-1.5 flex items-center justify-between gap-2 min-w-0">
+                    <span className="text-xs text-white truncate">{strategyLabels[key] || key}</span>
+                    <span className="text-xs text-muted-foreground shrink-0">{s.wins}W/{s.losses}L ({rate}%)</span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Como os wins costumam bater — ajuda a saber se dá pra ir direto ou se precisa esperar o G1 */}
+          {colorWins.length > 0 && (
+            <div className="mb-3">
+              <p className="text-xs text-muted-foreground mb-1">Como os wins bateram ({colorWins.length} no total):</p>
+              <div className="grid grid-cols-3 gap-1.5">
+                <div className="glass rounded p-2 text-center border border-green-500/20 min-w-0">
+                  <p className="text-[10px] text-muted-foreground uppercase truncate">Direto</p>
+                  <p className="text-lg font-mono font-bold text-green-400">{winsDireto}</p>
+                  <p className="text-[10px] text-muted-foreground">{Math.round((winsDireto / colorWins.length) * 100)}%</p>
+                </div>
+                <div className="glass rounded p-2 text-center border border-yellow-500/20 min-w-0">
+                  <p className="text-[10px] text-muted-foreground uppercase truncate">No G1</p>
+                  <p className="text-lg font-mono font-bold text-yellow-400">{winsG1}</p>
+                  <p className="text-[10px] text-muted-foreground">{Math.round((winsG1 / colorWins.length) * 100)}%</p>
+                </div>
+                <div className="glass rounded p-2 text-center border border-tie/30 min-w-0">
+                  <p className="text-[10px] text-muted-foreground uppercase truncate flex items-center justify-center gap-1">🟡 Empate</p>
+                  <p className="text-lg font-mono font-bold text-tie">{winsEmpate}</p>
+                  <p className="text-[10px] text-muted-foreground">{Math.round((winsEmpate / colorWins.length) * 100)}%</p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Abas + lista */}
+          <Tabs value={tab} onValueChange={setTab} className="w-full">
+            <TabsList className="mb-2 flex-wrap h-auto">
+              <TabsTrigger value="all">Tudo ({signals.length})</TabsTrigger>
+              <TabsTrigger value="color">Cor ({colorSignals.length})</TabsTrigger>
+              <TabsTrigger value="tie">Empate Seco ({tieSignals.length})</TabsTrigger>
+            </TabsList>
+            <TabsContent value={tab}>
+              {filtered.length === 0 ? (
+                <p className="text-muted-foreground text-sm text-center py-8">Nenhuma entrada aqui ainda...</p>
+              ) : (
+                [...filtered].reverse().map((s) => (
+                  <ResolvedSignalRow key={s.id} s={s} isOpen={openId === s.id} onToggle={() => setOpenId(openId === s.id ? null : s.id)} />
+                ))
+              )}
+            </TabsContent>
+          </Tabs>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const ResolvedSignalsPanel = memo(({ signals = [], onViewMore }) => {
+  const [openId, setOpenId] = useState(null);
+  if (signals.length === 0) return null;
+
+  const list = [...signals].reverse().slice(0, 3);
+
+  return (
+    <div className="glass rounded-lg p-4" data-testid="resolved-signals-panel">
+      <h3 className="font-heading font-semibold text-sm mb-3 flex items-center gap-2">
+        <CheckCircle2 className="w-4 h-4 text-green-400" />
+        Sinais Resolvidos
+      </h3>
+      <div className="space-y-1">
+        {list.map((s) => (
+          <ResolvedSignalRow key={s.id} s={s} isOpen={openId === s.id} onToggle={() => setOpenId(openId === s.id ? null : s.id)} />
+        ))}
+      </div>
+      {signals.length > 3 && (
+        <button
+          onClick={onViewMore}
+          className="w-full text-center text-xs text-player hover:underline mt-2 pt-2 border-t border-white/5"
+          data-testid="ver-mais-resolvidos"
+        >
+          Veja mais ({signals.length - 3} restantes) →
+        </button>
+      )}
+    </div>
+  );
+});
 
 // ============================================================
 // UserTriggers
@@ -625,6 +944,7 @@ export default function Dashboard() {
 
   const gc = GAME_CONFIGS[selectedGame] || GAME_CONFIGS.bacbo;
   const API_GAME = `${API}${gc.apiPrefix}`;
+  const isFS = !!gc.apiPrefix;
 
   const [state, setState] = useState({
     history: [],
@@ -635,9 +955,10 @@ export default function Dashboard() {
     min_probability: 60,
     auto_select: true,
     strategy_stats: {
-      adaptive:  { wins: 0, losses: 0, total: 0 },
-      pressure:  { wins: 0, losses: 0, total: 0 },
-      consensus: { wins: 0, losses: 0, total: 0 },
+      adaptive:   { wins: 0, losses: 0, total: 0 },
+      number:     { wins: 0, losses: 0, total: 0 },
+      number_pro: { wins: 0, losses: 0, total: 0 },
+      consensus:  { wins: 0, losses: 0, total: 0 },
     },
     percentages: { Player: 0, Banker: 0, Tie: 0 },
     patterns: {},
@@ -645,6 +966,9 @@ export default function Dashboard() {
     drift: { drift_detected: false, message: "" },
     tie_warning: false,
     trigger_results: [],
+    resolved_signals: [],
+    current_tie_watch: null,
+    session_start_time: null,
   });
 
   const [soundEnabled, setSoundEnabled] = useState(true);
@@ -652,6 +976,15 @@ export default function Dashboard() {
   const [localProbability, setLocalProbability] = useState(60);
   const [seqMin, setSeqMin] = useState(3);
   const [galeDisplay, setGaleDisplay] = useState(0);
+  const [showFullHistory, setShowFullHistory] = useState(false);
+  const stableHistoryRef = useRef([]);
+  const stableResolvedRef = useRef([]);
+  const stableLogsRef = useRef([]);
+  const stableStrategyStatsRef = useRef(null);
+  const stablePercentagesRef = useRef(null);
+  const stableMonteCarloRef = useRef(null);
+  const stablePatternsRef = useRef(null);
+  const stableTriggerResultsRef = useRef([]);
   const galeRef = useRef(0);
   const pendingSignalRef = useRef(null);
   const resolvingRef = useRef(false);
@@ -660,10 +993,11 @@ export default function Dashboard() {
   const lastResultKeyRef = useRef(null);
   const soundEnabledRef = useRef(soundEnabled);
   useEffect(() => { soundEnabledRef.current = soundEnabled; }, [soundEnabled]);
+  const pendingTieWatchRef = useRef(null); // resolve localmente, nunca conta no placar
 
-  const sendFeedback = useCallback(async (signalId, result) => {
+  const sendFeedback = useCallback(async (signalId, result, extra = {}) => {
     try {
-      await axios.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result });
+      await axios.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result, ...extra });
     } catch (e) {}
   }, [API_GAME]);
 
@@ -678,6 +1012,7 @@ export default function Dashboard() {
         resolvingRef.current = false;
         galeRef.current = 0;
         setGaleDisplay(0);
+        pendingTieWatchRef.current = null;
       }
       if (newState.session_token) sessionTokenRef.current = newState.session_token;
 
@@ -704,6 +1039,7 @@ export default function Dashboard() {
         for (const result of newResults) {
           if (!pendingSignalRef.current) break;
           const pending = pendingSignalRef.current;
+          const galeUsed = galeRef.current;
           const acertou = result.winner === pending.signal || result.winner === "Tie";
           if (acertou) {
             const label = result.winner === "Tie"
@@ -716,12 +1052,31 @@ export default function Dashboard() {
             galeRef.current = 0;
             setGaleDisplay(0);
             newState.current_signal = null;
-            lastHistoryLenRef.current = newLen;
-            lastResultKeyRef.current = lastResultKey;
-            setState(newState);
-            await sendFeedback(pending.id, "win");
+
+            // Se ganhou por Empate E tinha um Empate Seco pendente no MESMO round,
+            // manda o ID exato junto nessa ÚNICA chamada — evita a corrida que
+            // causava contagem dupla quando as duas resoluções eram separadas.
+            let tieWatchIdToResolve = null;
+            let tieWatchMultiplier = null;
+            if (result.winner === "Tie" && !isFS && pendingTieWatchRef.current) {
+              tieWatchIdToResolve = pendingTieWatchRef.current.id;
+              tieWatchMultiplier = getTieMultiplier(pendingTieWatchRef.current.number);
+              toast.success(`🟡 Empate Seco também bateu (número ${pendingTieWatchRef.current.number}${tieWatchMultiplier ? `, ${tieWatchMultiplier}x` : ""}) — já contado pelo sinal de cor`);
+              if (soundEnabledRef.current) playSound("tie_watch");
+              pendingTieWatchRef.current = null; // já resolvido aqui, não deixa a outra rotina mandar de novo
+            }
+
+            await sendFeedback(pending.id, "win", {
+              entry_signal: pending.signal,
+              gale: galeUsed,
+              actual_winner: result.winner,
+              player: result.player,
+              banker: result.banker,
+              tie_watch_id: tieWatchIdToResolve,
+              tie_watch_multiplier: tieWatchMultiplier,
+            });
             resolvingRef.current = false;
-            return;
+            break;
           } else if (galeRef.current < 1) {
             galeRef.current = 1;
             setGaleDisplay(1);
@@ -734,23 +1089,86 @@ export default function Dashboard() {
             galeRef.current = 0;
             setGaleDisplay(0);
             newState.current_signal = null;
-            lastHistoryLenRef.current = newLen;
-            lastResultKeyRef.current = lastResultKey;
-            setState(newState);
-            await sendFeedback(pending.id, "loss");
+            await sendFeedback(pending.id, "loss", {
+              entry_signal: pending.signal,
+              gale: galeUsed,
+              actual_winner: result.winner,
+              player: result.player,
+              banker: result.banker,
+            });
             resolvingRef.current = false;
-            return;
+            break;
           }
         }
       }
 
+      lastHistoryLenRef.current = newLen;
       lastResultKeyRef.current = lastResultKey;
+
+      // Empate Seco 🟡 — entra no placar geral quando ganha. O BACKEND decide
+      // se já foi contado pelo sinal de cor (resposta "duplicate"), evitando
+      // contar 2x sem depender de cálculo aqui no front.
+      if (!isFS) {
+        if (hasNewResult && pendingTieWatchRef.current) {
+          const pendingTW = pendingTieWatchRef.current;
+          const newResults = atLimit ? [lastResult] : newState.history.slice(prevLen);
+          const deuTie = newResults.some(r => r.winner === "Tie");
+          const multiplier = getTieMultiplier(pendingTW.number);
+          pendingTieWatchRef.current = null;
+          try {
+            const res = await axios.post(`${API_GAME}/tiewatch/feedback`, {
+              watch_id: pendingTW.id,
+              result: deuTie ? "win" : "loss",
+              multiplier,
+            });
+            const jaContado = res.data?.duplicate === true;
+            if (deuTie) {
+              toast.success(
+                jaContado
+                  ? `🟡 Empate Seco também bateu (número ${pendingTW.number}${multiplier ? `, ${multiplier}x` : ""}) — já contado pelo sinal de cor`
+                  : `🟡 Empate Seco bateu! (número ${pendingTW.number}${multiplier ? `, ${multiplier}x` : ""})`
+              );
+              if (soundEnabledRef.current) playSound("tie_watch");
+            } else if (!jaContado) {
+              toast.info("Empate Seco não bateu dessa vez");
+            }
+          } catch (e) {}
+        }
+        if (newState.current_tie_watch && !pendingTieWatchRef.current) {
+          pendingTieWatchRef.current = newState.current_tie_watch;
+          toast.info("🟡 Empate Seco ativo — de olho!");
+          if (soundEnabledRef.current) playSound("tie_watch");
+        }
+      }
 
       if (newState.current_signal && !pendingSignalRef.current && !resolvingRef.current) {
         pendingSignalRef.current = newState.current_signal;
         galeRef.current = 0;
         setGaleDisplay(0);
       }
+
+      // Reaproveita referências antigas quando o conteúdo não mudou de verdade —
+      // deixa o React.memo dos painéis pesados (histórico, logs, sinais) funcionar
+      newState.history = stabilizeArray(
+        stableHistoryRef, newState.history,
+        (r) => r ? `${r.winner}_${r.player ?? r.casa ?? 0}_${r.banker ?? r.visitante ?? 0}` : ""
+      );
+      newState.resolved_signals = stabilizeArray(
+        stableResolvedRef, newState.resolved_signals,
+        (s) => s ? s.id : ""
+      );
+      newState.logs = stabilizeArray(
+        stableLogsRef, newState.logs,
+        (l, i) => l ? `${i}_${l.message}` : ""
+      );
+      newState.strategy_stats = stabilizeObject(stableStrategyStatsRef, newState.strategy_stats);
+      newState.percentages = stabilizeObject(stablePercentagesRef, newState.percentages);
+      newState.monte_carlo = stabilizeObject(stableMonteCarloRef, newState.monte_carlo);
+      newState.patterns = stabilizeObject(stablePatternsRef, newState.patterns);
+      newState.trigger_results = stabilizeArray(
+        stableTriggerResultsRef, newState.trigger_results,
+        (t) => t ? `${t.id}_${t.active}_${t.active_now}_${t.rate}_${t.total}` : ""
+      );
 
       lastHistoryLenRef.current = newLen;
       setState(newState);
@@ -760,7 +1178,7 @@ export default function Dashboard() {
     } finally {
       setLoading(false);
     }
-  }, [sendFeedback, loading, API_GAME, gc.labels.tie]);
+  }, [sendFeedback, loading, API_GAME, gc.labels.tie, isFS]);
 
   useEffect(() => {
     fetchState();
@@ -768,7 +1186,7 @@ export default function Dashboard() {
     return () => clearInterval(interval);
   }, [fetchState]);
 
-  const handleStrategyChange = async (strategy) => {
+  const handleStrategyChange = useCallback(async (strategy) => {
     try {
       await axios.post(`${API_GAME}/strategy`, { strategy });
       pendingSignalRef.current = null;
@@ -781,7 +1199,7 @@ export default function Dashboard() {
     } catch (error) {
       toast.error("Erro ao alterar estratégia");
     }
-  };
+  }, [API_GAME, soundEnabled, fetchState]);
 
   const handleSaveTriggers = async (list) => {
     try {
@@ -789,13 +1207,13 @@ export default function Dashboard() {
     } catch (e) {}
   };
 
-  const handleAutoSelect = async (enabled) => {
+  const handleAutoSelect = useCallback(async (enabled) => {
     try {
       await axios.post(`${API_GAME}/auto_select`, { enabled });
       toast.info(enabled ? "Auto-seleção ativada" : "Auto-seleção desativada");
       fetchState();
     } catch (error) {}
-  };
+  }, [API_GAME, fetchState]);
 
   const handleProbabilityChange = async (value) => {
     try {
@@ -804,12 +1222,14 @@ export default function Dashboard() {
     } catch (error) {}
   };
 
-  const handleSeqMinChange = async (val) => {
+  const handleSeqMinChange = useCallback(async (val) => {
     setSeqMin(val);
     try {
       await axios.post(`${API_GAME}/seq_min`, { seq_min: val });
     } catch (e) {}
-  };
+  }, [API_GAME]);
+
+  const handleViewMore = useCallback(() => setShowFullHistory(true), []);
 
   const handleReset = async () => {
     try {
@@ -837,7 +1257,7 @@ export default function Dashboard() {
 
   if (loading) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-[#050505]">
+      <div className="min-h-screen flex items-center justify-center bg-[#14171c]">
         <div className="text-center">
           <Zap className="w-12 h-12 text-player animate-pulse mx-auto" />
           <p className="text-muted-foreground mt-4">Carregando...</p>
@@ -847,7 +1267,7 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="min-h-screen bg-[#050505]" data-testid="dashboard">
+    <div className="min-h-screen bg-[#14171c]" data-testid="dashboard">
       {/* Header */}
       <header className="sticky top-0 z-50 glass border-b border-white/10 px-4 py-3">
         <div className="flex items-center justify-between max-w-7xl mx-auto">
@@ -909,6 +1329,18 @@ export default function Dashboard() {
           <div className="glass border border-tie/50 rounded-lg p-3 flex items-center gap-2 animate-fadeIn">
             <AlertTriangle className="w-5 h-5 text-tie" />
             <span className="text-tie text-sm">{state.drift.message}</span>
+          </div>
+        )}
+
+        {!isFS && state.current_tie_watch && (
+          <div className="glass border border-tie/50 rounded-lg p-3 flex items-start gap-2 animate-fadeIn" data-testid="tie-watch-alert">
+            <span className="text-lg leading-none">🟡</span>
+            <div className="flex-1">
+              <p className="text-tie text-sm font-semibold">Empate Seco ativo — conta no placar geral</p>
+              {state.current_tie_watch.alerts.map((a, i) => (
+                <p key={i} className="text-xs text-muted-foreground">{a.reason}</p>
+              ))}
+            </div>
           </div>
         )}
 
@@ -1010,7 +1442,7 @@ export default function Dashboard() {
               gc={gc}
             />
 
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-3 gap-2">
               <Button
                 variant="outline"
                 onClick={handleReset}
@@ -1020,15 +1452,38 @@ export default function Dashboard() {
                 <RotateCcw className="w-4 h-4 mr-2" />
                 Reset Placar
               </Button>
+              {!isFS && (
+                <Button
+                  variant="outline"
+                  onClick={() => setShowFullHistory(true)}
+                  className="border-white/20 hover:bg-white/10"
+                  data-testid="ver-historico-completo-btn"
+                >
+                  <CheckCircle2 className="w-4 h-4 mr-2" />
+                  Histórico
+                </Button>
+              )}
               <Button
                 onClick={() => window.open(gc.link, "_blank")}
-                className="bg-player text-black hover:bg-player/90"
+                className={`bg-player text-black hover:bg-player/90 ${isFS ? "col-span-2" : ""}`}
                 data-testid="goto-game-btn"
               >
                 <ExternalLink className="w-4 h-4 mr-2" />
                 {gc.linkLabel}
               </Button>
             </div>
+
+            {!isFS && <ResolvedSignalsPanel signals={state.resolved_signals} onViewMore={handleViewMore} />}
+
+            {!isFS && showFullHistory && (
+              <FullHistoryModal
+                signals={state.resolved_signals}
+                stats={state.stats}
+                strategyStats={state.strategy_stats}
+                sessionStartTime={state.session_start_time}
+                onClose={() => setShowFullHistory(false)}
+              />
+            )}
 
             <div className="glass rounded-lg p-4" data-testid="logs-panel">
               <h3 className="font-heading font-semibold mb-3 flex items-center gap-2">

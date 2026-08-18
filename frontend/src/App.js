@@ -47,7 +47,7 @@ function App() {
 
   return (
     <AuthContext.Provider value={{ isAuthenticated, login, logout, selectedGame, selectGame }}>
-      <div className="dark min-h-screen bg-[#050505]">
+      <div className="dark min-h-screen bg-[#14171c]">
         <BrowserRouter>
           <Routes>
             <Route
