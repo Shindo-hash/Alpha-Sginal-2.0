@@ -1951,6 +1951,10 @@ async def admin_list_users(admin=Depends(get_current_admin)):
 
     data = resp.json()
     users = data.get("users", data if isinstance(data, list) else [])
+    logger.info(f"🔍 DEBUG ADMIN_EMAIL={ADMIN_EMAIL!r}")
+    for u in users:
+        u_email_norm = (u.get("email") or "").strip().lower()
+        logger.info(f"🔍 DEBUG comparando: {u_email_norm!r} == {ADMIN_EMAIL!r} -> {u_email_norm == ADMIN_EMAIL}")
     return {
         "users": [
             {
