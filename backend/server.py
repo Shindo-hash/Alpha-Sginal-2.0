@@ -97,13 +97,17 @@ async def get_current_user(authorization: Optional[str] = Header(None), x_device
     Também confere o limite de dispositivos (header X-Device-Id, mandado
     pelo frontend) — se o aparelho não é conhecido e o usuário já atingiu o
     limite dele, barra o acesso mesmo com login/senha corretos.
+    O e-mail de admin (ADMIN_EMAIL) é isento desse limite automaticamente.
     """
     payload = await _verify_token(authorization)
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Token inválido.")
 
-    if x_device_id:
+    email = (payload.get("email") or "").strip().lower()
+    is_admin = bool(ADMIN_EMAIL) and email == ADMIN_EMAIL
+
+    if x_device_id and not is_admin:
         allowed = await _register_device_if_allowed(user_id, x_device_id)
         if not allowed:
             raise HTTPException(
@@ -111,7 +115,6 @@ async def get_current_user(authorization: Optional[str] = Header(None), x_device
                 detail="Limite de dispositivos atingido para esse login. Fale com o suporte."
             )
 
-    return user_id
     return user_id
 
 
