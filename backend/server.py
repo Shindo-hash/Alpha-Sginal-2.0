@@ -138,6 +138,23 @@ def _supabase_admin_headers() -> Dict[str, str]:
     }
 
 
+async def _supabase_request(method: str, url: str, **kwargs) -> httpx.Response:
+    """
+    Chamada HTTP pro Supabase com tratamento de erro consistente. Sem isso,
+    uma falha de rede (timeout, DNS, etc) vira uma exceção não tratada que
+    quebra a resposta ANTES do CORS ser aplicado — o navegador então mostra
+    "bloqueado por CORS", mascarando o erro real. Com isso, sempre volta um
+    erro de verdade (502), com CORS certo, e com a mensagem real no log.
+    """
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.request(method, url, timeout=15, **kwargs)
+        return resp
+    except Exception as e:
+        logger.error(f"Erro de conexão com o Supabase ({method} {url}): {e}")
+        raise HTTPException(status_code=502, detail=f"Erro de conexão com o Supabase: {e}")
+
+
 # ============================================================
 # Limite de dispositivos — cada usuário só pode logar em N aparelhos
 # diferentes ao mesmo tempo (configurável por cliente, padrão 1). Guardado
@@ -1882,13 +1899,11 @@ async def admin_create_user(request: Request, admin=Depends(get_current_admin)):
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Senha precisa ter pelo menos 6 caracteres.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers=_supabase_admin_headers(),
-            json={"email": email, "password": password, "email_confirm": True},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "POST", f"{SUPABASE_URL}/auth/v1/admin/users",
+        headers=_supabase_admin_headers(),
+        json={"email": email, "password": password, "email_confirm": True},
+    )
 
     if resp.status_code >= 400:
         try:
@@ -1908,16 +1923,15 @@ async def admin_list_users(admin=Depends(get_current_admin)):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers=_supabase_admin_headers(),
-            params={"per_page": 200},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "GET", f"{SUPABASE_URL}/auth/v1/admin/users",
+        headers=_supabase_admin_headers(),
+        params={"per_page": 200},
+    )
 
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail="Falha ao listar usuários no Supabase.")
+        logger.error(f"Supabase (list users) {resp.status_code}: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail=f"Falha ao listar usuários: {resp.text[:200]}")
 
     data = resp.json()
     users = data.get("users", data if isinstance(data, list) else [])
@@ -1940,12 +1954,10 @@ async def admin_delete_user(user_id: str, admin=Depends(get_current_admin)):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.delete(
-            f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
-            headers=_supabase_admin_headers(),
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "DELETE", f"{SUPABASE_URL}/auth/v1/admin/users/{user_id}",
+        headers=_supabase_admin_headers(),
+    )
 
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail="Falha ao remover usuário no Supabase.")
@@ -1974,15 +1986,14 @@ async def signup_request(request: Request):
     if len(password) < 6:
         raise HTTPException(status_code=400, detail="Senha precisa ter pelo menos 6 caracteres.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{SUPABASE_URL}/rest/v1/pending_signups",
-            headers={**_supabase_admin_headers(), "Prefer": "return=representation"},
-            json={"username": username, "password": password},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "POST", f"{SUPABASE_URL}/rest/v1/pending_signups",
+        headers={**_supabase_admin_headers(), "Prefer": "return=representation"},
+        json={"username": username, "password": password},
+    )
 
     if resp.status_code >= 400:
+        logger.error(f"Supabase (signup-request) {resp.status_code}: {resp.text}")
         raise HTTPException(status_code=400, detail="Esse usuário já foi pedido antes. Tenta outro nome.")
 
     return {"success": True}
@@ -1994,16 +2005,15 @@ async def admin_list_pending_signups(admin=Depends(get_current_admin)):
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/pending_signups",
-            headers=_supabase_admin_headers(),
-            params={"status": "eq.pending", "order": "created_at.desc"},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "GET", f"{SUPABASE_URL}/rest/v1/pending_signups",
+        headers=_supabase_admin_headers(),
+        params={"status": "eq.pending", "order": "created_at.desc"},
+    )
 
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail="Falha ao listar pedidos pendentes.")
+        logger.error(f"Supabase (pending-signups) {resp.status_code}: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail=f"Falha ao listar pedidos: {resp.text[:200]}")
 
     return {"pending": resp.json()}
 
@@ -2014,13 +2024,11 @@ async def admin_approve_signup(pending_id: str, admin=Depends(get_current_admin)
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        find_resp = await client.get(
-            f"{SUPABASE_URL}/rest/v1/pending_signups",
-            headers=_supabase_admin_headers(),
-            params={"id": f"eq.{pending_id}"},
-            timeout=15,
-        )
+    find_resp = await _supabase_request(
+        "GET", f"{SUPABASE_URL}/rest/v1/pending_signups",
+        headers=_supabase_admin_headers(),
+        params={"id": f"eq.{pending_id}"},
+    )
 
     if find_resp.status_code >= 400 or not find_resp.json():
         raise HTTPException(status_code=404, detail="Pedido não encontrado.")
@@ -2030,13 +2038,11 @@ async def admin_approve_signup(pending_id: str, admin=Depends(get_current_admin)
     password = pending["password"]
     email = f"{username.lower()}@alphasignal.local"
 
-    async with httpx.AsyncClient() as client:
-        create_resp = await client.post(
-            f"{SUPABASE_URL}/auth/v1/admin/users",
-            headers=_supabase_admin_headers(),
-            json={"email": email, "password": password, "email_confirm": True},
-            timeout=15,
-        )
+    create_resp = await _supabase_request(
+        "POST", f"{SUPABASE_URL}/auth/v1/admin/users",
+        headers=_supabase_admin_headers(),
+        json={"email": email, "password": password, "email_confirm": True},
+    )
 
     if create_resp.status_code >= 400:
         try:
@@ -2045,14 +2051,12 @@ async def admin_approve_signup(pending_id: str, admin=Depends(get_current_admin)
             detail = create_resp.text
         raise HTTPException(status_code=create_resp.status_code, detail=f"Supabase recusou: {detail}")
 
-    async with httpx.AsyncClient() as client:
-        await client.patch(
-            f"{SUPABASE_URL}/rest/v1/pending_signups",
-            headers=_supabase_admin_headers(),
-            params={"id": f"eq.{pending_id}"},
-            json={"status": "approved"},
-            timeout=15,
-        )
+    await _supabase_request(
+        "PATCH", f"{SUPABASE_URL}/rest/v1/pending_signups",
+        headers=_supabase_admin_headers(),
+        params={"id": f"eq.{pending_id}"},
+        json={"status": "approved"},
+    )
 
     logger.info(f"[admin] Pedido aprovado: {username} (por {admin.get('email')})")
     return {"success": True, "username": username}
@@ -2064,14 +2068,12 @@ async def admin_reject_signup(pending_id: str, admin=Depends(get_current_admin))
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.patch(
-            f"{SUPABASE_URL}/rest/v1/pending_signups",
-            headers=_supabase_admin_headers(),
-            params={"id": f"eq.{pending_id}"},
-            json={"status": "rejected"},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "PATCH", f"{SUPABASE_URL}/rest/v1/pending_signups",
+        headers=_supabase_admin_headers(),
+        params={"id": f"eq.{pending_id}"},
+        json={"status": "rejected"},
+    )
 
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail="Falha ao rejeitar pedido.")
@@ -2101,16 +2103,15 @@ async def admin_set_max_devices(user_id: str, request: Request, admin=Depends(ge
     if max_devices < 1 or max_devices > 10:
         raise HTTPException(status_code=400, detail="Deve ser entre 1 e 10 dispositivos.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{SUPABASE_URL}/rest/v1/user_device_limits",
-            headers={**_supabase_admin_headers(), "Prefer": "resolution=merge-duplicates"},
-            json={"user_id": user_id, "max_devices": max_devices},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "POST", f"{SUPABASE_URL}/rest/v1/user_device_limits",
+        headers={**_supabase_admin_headers(), "Prefer": "resolution=merge-duplicates"},
+        json={"user_id": user_id, "max_devices": max_devices},
+    )
 
     if resp.status_code >= 400:
-        raise HTTPException(status_code=resp.status_code, detail="Falha ao salvar o limite.")
+        logger.error(f"Supabase (max-devices) {resp.status_code}: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail=f"Falha ao salvar o limite: {resp.text[:200]}")
 
     device_cache.pop(user_id, None)  # força recarregar na próxima checagem
     return {"success": True, "max_devices": max_devices}
@@ -2122,13 +2123,11 @@ async def admin_remove_device(user_id: str, device_id: str, admin=Depends(get_cu
     if not SUPABASE_SERVICE_ROLE_KEY:
         raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
 
-    async with httpx.AsyncClient() as client:
-        resp = await client.delete(
-            f"{SUPABASE_URL}/rest/v1/user_devices",
-            headers=_supabase_admin_headers(),
-            params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
-            timeout=15,
-        )
+    resp = await _supabase_request(
+        "DELETE", f"{SUPABASE_URL}/rest/v1/user_devices",
+        headers=_supabase_admin_headers(),
+        params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
+    )
 
     if resp.status_code >= 400:
         raise HTTPException(status_code=resp.status_code, detail="Falha ao remover dispositivo.")
@@ -2145,7 +2144,10 @@ app.include_router(admin_router)
 app.add_middleware(
     CORSMiddleware,
     allow_credentials=True,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://alpha-sginal-2-0.vercel.app",
+        "http://localhost:3000",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )
