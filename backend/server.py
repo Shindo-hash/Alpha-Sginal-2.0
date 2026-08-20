@@ -89,15 +89,29 @@ async def _verify_token(authorization: Optional[str]) -> Dict[str, Any]:
     return payload
 
 
-async def get_current_user(authorization: Optional[str] = Header(None)) -> str:
+async def get_current_user(authorization: Optional[str] = Header(None), x_device_id: Optional[str] = Header(None)) -> str:
     """
     Extrai e valida o JWT do Supabase mandado no header Authorization.
     Retorna o ID (uuid) do usuário — usado como chave pra achar o estado dele.
+
+    Também confere o limite de dispositivos (header X-Device-Id, mandado
+    pelo frontend) — se o aparelho não é conhecido e o usuário já atingiu o
+    limite dele, barra o acesso mesmo com login/senha corretos.
     """
     payload = await _verify_token(authorization)
     user_id = payload.get("sub")
     if not user_id:
         raise HTTPException(status_code=401, detail="Token inválido.")
+
+    if x_device_id:
+        allowed = await _register_device_if_allowed(user_id, x_device_id)
+        if not allowed:
+            raise HTTPException(
+                status_code=403,
+                detail="Limite de dispositivos atingido para esse login. Fale com o suporte."
+            )
+
+    return user_id
     return user_id
 
 
@@ -111,6 +125,110 @@ async def get_current_admin(authorization: Optional[str] = Header(None)) -> Dict
     if not ADMIN_EMAIL or email != ADMIN_EMAIL:
         raise HTTPException(status_code=403, detail="Acesso restrito ao administrador.")
     return payload
+
+
+def _supabase_admin_headers() -> Dict[str, str]:
+    return {
+        "apikey": SUPABASE_SERVICE_ROLE_KEY,
+        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
+        "Content-Type": "application/json",
+    }
+
+
+# ============================================================
+# Limite de dispositivos — cada usuário só pode logar em N aparelhos
+# diferentes ao mesmo tempo (configurável por cliente, padrão 1). Guardado
+# nas tabelas user_devices e user_device_limits no Supabase (Postgres).
+#
+# Pra não bater no banco a cada poll (a cada 500ms!), mantém um cache em
+# memória de alguns minutos por usuário — só recarrega quando expira ou
+# quando um dispositivo novo aparece.
+# ============================================================
+device_cache: Dict[str, Dict[str, Any]] = {}
+DEVICE_CACHE_TTL = 300  # 5 minutos
+
+async def _load_user_devices(user_id: str, force: bool = False) -> Dict[str, Any]:
+    cached = device_cache.get(user_id)
+    if not force and cached and (time.time() - cached["loaded_at"]) < DEVICE_CACHE_TTL:
+        return cached
+
+    devices = set()
+    max_devices = 1
+
+    if SUPABASE_SERVICE_ROLE_KEY:
+        try:
+            async with httpx.AsyncClient() as client:
+                devices_resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/user_devices",
+                    headers=_supabase_admin_headers(),
+                    params={"user_id": f"eq.{user_id}", "select": "device_id"},
+                    timeout=10,
+                )
+                limit_resp = await client.get(
+                    f"{SUPABASE_URL}/rest/v1/user_device_limits",
+                    headers=_supabase_admin_headers(),
+                    params={"user_id": f"eq.{user_id}", "select": "max_devices"},
+                    timeout=10,
+                )
+            if devices_resp.status_code < 400:
+                devices = {d["device_id"] for d in devices_resp.json()}
+            if limit_resp.status_code < 400 and limit_resp.json():
+                max_devices = limit_resp.json()[0].get("max_devices", 1)
+        except Exception as e:
+            logger.warning(f"Falha ao carregar dispositivos de {user_id}: {e}")
+
+    result = {"devices": devices, "max_devices": max_devices, "loaded_at": time.time()}
+    device_cache[user_id] = result
+    return result
+
+
+async def _touch_device(user_id: str, device_id: str):
+    """Atualiza o 'visto por último' em segundo plano — não trava a requisição."""
+    try:
+        from datetime import datetime, timezone
+        async with httpx.AsyncClient() as client:
+            await client.patch(
+                f"{SUPABASE_URL}/rest/v1/user_devices",
+                headers=_supabase_admin_headers(),
+                params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
+                json={"last_seen": datetime.now(timezone.utc).isoformat()},
+                timeout=10,
+            )
+    except Exception:
+        pass
+
+
+async def _register_device_if_allowed(user_id: str, device_id: str) -> bool:
+    """
+    True se esse dispositivo já é conhecido, ou se ainda há espaço pra
+    registrar um novo. False se o limite já foi atingido.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return True  # sem chave configurada, não dá pra checar — deixa passar
+
+    info = await _load_user_devices(user_id)
+
+    if device_id in info["devices"]:
+        asyncio.create_task(_touch_device(user_id, device_id))
+        return True
+
+    if len(info["devices"]) >= info["max_devices"]:
+        return False
+
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.post(
+                f"{SUPABASE_URL}/rest/v1/user_devices",
+                headers=_supabase_admin_headers(),
+                json={"user_id": user_id, "device_id": device_id},
+                timeout=10,
+            )
+        if resp.status_code < 400:
+            info["devices"].add(device_id)
+    except Exception as e:
+        logger.warning(f"Falha ao registrar dispositivo {device_id} de {user_id}: {e}")
+
+    return True
 
 
 # ============================================================
@@ -1746,14 +1864,6 @@ async def fs_reset_stats(user: str = Depends(get_current_user)):
 # tem poder total — por isso fica só aqui no backend, nunca no frontend.
 # ============================================================
 
-def _supabase_admin_headers() -> Dict[str, str]:
-    return {
-        "apikey": SUPABASE_SERVICE_ROLE_KEY,
-        "Authorization": f"Bearer {SUPABASE_SERVICE_ROLE_KEY}",
-        "Content-Type": "application/json",
-    }
-
-
 @admin_router.post("/users")
 async def admin_create_user(request: Request, admin=Depends(get_current_admin)):
     """Cria um login novo (e-mail + senha) — já funciona no AlphaSignal e no MetaEdge."""
@@ -1838,6 +1948,189 @@ async def admin_delete_user(user_id: str, admin=Depends(get_current_admin)):
         raise HTTPException(status_code=resp.status_code, detail="Falha ao remover usuário no Supabase.")
 
     logger.info(f"[admin] Usuário removido: {user_id} (por {admin.get('email')})")
+    return {"success": True}
+
+
+# ============================================================
+# FILA DE APROVAÇÃO — cliente pede um usuário/senha, fica pendente até o
+# Fernando aprovar manualmente pelo painel de admin.
+# ============================================================
+
+@api_router.post("/signup-request")
+async def signup_request(request: Request):
+    """Rota PÚBLICA — qualquer um pode pedir um login, mas fica pendente até aprovação."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="Servidor não configurado pra receber pedidos agora.")
+
+    data = await request.json()
+    username = (data.get("username") or "").strip()
+    password = data.get("password") or ""
+
+    if not username or len(username) < 3:
+        raise HTTPException(status_code=400, detail="Usuário precisa ter pelo menos 3 caracteres.")
+    if len(password) < 6:
+        raise HTTPException(status_code=400, detail="Senha precisa ter pelo menos 6 caracteres.")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/pending_signups",
+            headers={**_supabase_admin_headers(), "Prefer": "return=representation"},
+            json={"username": username, "password": password},
+            timeout=15,
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=400, detail="Esse usuário já foi pedido antes. Tenta outro nome.")
+
+    return {"success": True}
+
+
+@admin_router.get("/pending-signups")
+async def admin_list_pending_signups(admin=Depends(get_current_admin)):
+    """Lista os pedidos de cadastro esperando aprovação."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/pending_signups",
+            headers=_supabase_admin_headers(),
+            params={"status": "eq.pending", "order": "created_at.desc"},
+            timeout=15,
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail="Falha ao listar pedidos pendentes.")
+
+    return {"pending": resp.json()}
+
+
+@admin_router.post("/pending-signups/{pending_id}/approve")
+async def admin_approve_signup(pending_id: str, admin=Depends(get_current_admin)):
+    """Aprova um pedido — cria o login de verdade no Supabase."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
+
+    async with httpx.AsyncClient() as client:
+        find_resp = await client.get(
+            f"{SUPABASE_URL}/rest/v1/pending_signups",
+            headers=_supabase_admin_headers(),
+            params={"id": f"eq.{pending_id}"},
+            timeout=15,
+        )
+
+    if find_resp.status_code >= 400 or not find_resp.json():
+        raise HTTPException(status_code=404, detail="Pedido não encontrado.")
+
+    pending = find_resp.json()[0]
+    username = pending["username"]
+    password = pending["password"]
+    email = f"{username.lower()}@alphasignal.local"
+
+    async with httpx.AsyncClient() as client:
+        create_resp = await client.post(
+            f"{SUPABASE_URL}/auth/v1/admin/users",
+            headers=_supabase_admin_headers(),
+            json={"email": email, "password": password, "email_confirm": True},
+            timeout=15,
+        )
+
+    if create_resp.status_code >= 400:
+        try:
+            detail = create_resp.json().get("msg", create_resp.text)
+        except Exception:
+            detail = create_resp.text
+        raise HTTPException(status_code=create_resp.status_code, detail=f"Supabase recusou: {detail}")
+
+    async with httpx.AsyncClient() as client:
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/pending_signups",
+            headers=_supabase_admin_headers(),
+            params={"id": f"eq.{pending_id}"},
+            json={"status": "approved"},
+            timeout=15,
+        )
+
+    logger.info(f"[admin] Pedido aprovado: {username} (por {admin.get('email')})")
+    return {"success": True, "username": username}
+
+
+@admin_router.post("/pending-signups/{pending_id}/reject")
+async def admin_reject_signup(pending_id: str, admin=Depends(get_current_admin)):
+    """Rejeita um pedido — não cria login nenhum."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.patch(
+            f"{SUPABASE_URL}/rest/v1/pending_signups",
+            headers=_supabase_admin_headers(),
+            params={"id": f"eq.{pending_id}"},
+            json={"status": "rejected"},
+            timeout=15,
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail="Falha ao rejeitar pedido.")
+
+    return {"success": True}
+
+
+# ============================================================
+# GESTÃO DE DISPOSITIVOS — ver/ajustar quantos aparelhos cada cliente pode usar
+# ============================================================
+
+@admin_router.get("/users/{user_id}/devices")
+async def admin_get_user_devices(user_id: str, admin=Depends(get_current_admin)):
+    """Mostra os dispositivos conhecidos de um usuário e o limite dele."""
+    info = await _load_user_devices(user_id, force=True)
+    return {"devices": list(info["devices"]), "max_devices": info["max_devices"]}
+
+
+@admin_router.post("/users/{user_id}/max-devices")
+async def admin_set_max_devices(user_id: str, request: Request, admin=Depends(get_current_admin)):
+    """Muda quantos aparelhos esse usuário pode usar ao mesmo tempo."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
+
+    data = await request.json()
+    max_devices = data.get("max_devices", 1)
+    if max_devices < 1 or max_devices > 10:
+        raise HTTPException(status_code=400, detail="Deve ser entre 1 e 10 dispositivos.")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/user_device_limits",
+            headers={**_supabase_admin_headers(), "Prefer": "resolution=merge-duplicates"},
+            json={"user_id": user_id, "max_devices": max_devices},
+            timeout=15,
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail="Falha ao salvar o limite.")
+
+    device_cache.pop(user_id, None)  # força recarregar na próxima checagem
+    return {"success": True, "max_devices": max_devices}
+
+
+@admin_router.delete("/users/{user_id}/devices/{device_id}")
+async def admin_remove_device(user_id: str, device_id: str, admin=Depends(get_current_admin)):
+    """Remove um dispositivo específico, liberando espaço pra outro novo."""
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise HTTPException(status_code=500, detail="SUPABASE_SERVICE_ROLE_KEY não configurado no servidor.")
+
+    async with httpx.AsyncClient() as client:
+        resp = await client.delete(
+            f"{SUPABASE_URL}/rest/v1/user_devices",
+            headers=_supabase_admin_headers(),
+            params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
+            timeout=15,
+        )
+
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=resp.status_code, detail="Falha ao remover dispositivo.")
+
+    device_cache.pop(user_id, None)
     return {"success": True}
 
 

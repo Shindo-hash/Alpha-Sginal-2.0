@@ -18,11 +18,25 @@ function decodeJwtPayload(token) {
   }
 }
 
+// ID de dispositivo — gerado uma vez e guardado no localStorage (sobrevive
+// a F5 E a fechar/abrir o navegador, diferente do token de sessão). Usado
+// pelo backend pra saber se esse é um aparelho já conhecido desse login ou
+// um novo, aplicando o limite de dispositivos configurado por cliente.
+function getDeviceId() {
+  let id = localStorage.getItem("alphasignal_device_id");
+  if (!id) {
+    id = (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    localStorage.setItem("alphasignal_device_id", id);
+  }
+  return id;
+}
+
 api.interceptors.request.use(async (config) => {
   const { data } = await supabase.auth.getSession();
   const token = data?.session?.access_token;
   if (token) {
     config.headers.Authorization = `Bearer ${token}`;
+    config.headers["X-Device-Id"] = getDeviceId();
     if (token !== _lastLoggedToken) {
       _lastLoggedToken = token;
       const payload = decodeJwtPayload(token);
@@ -33,5 +47,23 @@ api.interceptors.request.use(async (config) => {
   }
   return config;
 });
+
+// Se o backend recusar por limite de dispositivos (403 específico), desloga
+// e manda pra tela de login com uma explicação clara — evita o app ficar
+// "travado" silenciosamente tentando chamadas que sempre vão falhar.
+let _handlingDeviceLimit = false;
+api.interceptors.response.use(
+  (response) => response,
+  async (error) => {
+    const detail = error?.response?.data?.detail || "";
+    if (error?.response?.status === 403 && detail.includes("dispositivos") && !_handlingDeviceLimit) {
+      _handlingDeviceLimit = true;
+      console.error("🚫 Limite de dispositivos atingido:", detail);
+      await supabase.auth.signOut();
+      window.location.href = "/login?device_limit=1";
+    }
+    return Promise.reject(error);
+  }
+);
 
 export default api;

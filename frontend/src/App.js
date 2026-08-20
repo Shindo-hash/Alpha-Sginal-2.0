@@ -3,6 +3,7 @@ import { useState, useEffect, createContext, useContext } from "react";
 import { supabase } from "./lib/supabaseClient";
 import api from "./lib/api";
 import Login from "./pages/Login";
+import Signup from "./pages/Signup";
 import Dashboard from "./pages/Dashboard";
 import GameSelect from "./pages/GameSelect";
 import AdminPage from "./pages/AdminPage";
@@ -77,6 +78,10 @@ function App() {
             <Route
               path="/login"
               element={isAuthenticated ? <Navigate to="/" replace /> : <Login />}
+            />
+            <Route
+              path="/signup"
+              element={isAuthenticated ? <Navigate to="/" replace /> : <Signup />}
             />
             <Route
               path="/select-game"

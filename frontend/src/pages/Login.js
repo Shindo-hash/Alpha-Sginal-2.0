@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../App";
 import { supabase } from "../lib/supabaseClient";
@@ -8,18 +8,41 @@ import { Label } from "../components/ui/label";
 import { MessageCircle, Zap } from "lucide-react";
 import { toast } from "sonner";
 
+// Login aceita usuário simples OU e-mail de verdade. Se não tiver "@", vira
+// um e-mail disfarçado por trás — o Supabase sempre exige formato de e-mail
+// pra login com senha, mas o cliente nunca vê isso, só digita o usuário.
+function toSupabaseIdentifier(input) {
+  const trimmed = input.trim();
+  if (trimmed.includes("@")) return trimmed; // já é um e-mail de verdade (ex: admin)
+  return `${trimmed.toLowerCase()}@alphasignal.local`;
+}
+
 export default function Login() {
-  const [email, setEmail] = useState("");
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
   const navigate = useNavigate();
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get("device_limit") === "1") {
+      toast.error("Limite de dispositivos atingido nesse login.", {
+        duration: 10000,
+        action: {
+          label: "Falar no WhatsApp",
+          onClick: () => window.open("https://wa.me/5563981228800", "_blank"),
+        },
+      });
+    }
+  }, []);
 
   const handleSubmit = async (e) => {
     e.preventDefault();
     setLoading(true);
 
     try {
+      const email = toSupabaseIdentifier(username);
       const { error } = await supabase.auth.signInWithPassword({ email, password });
 
       if (error) {
@@ -61,19 +84,19 @@ export default function Login() {
         >
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="email" className="text-white">
-                E-mail
+              <Label htmlFor="username" className="text-white">
+                Usuário
               </Label>
               <Input
-                id="email"
-                type="email"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                placeholder="seu@email.com"
+                id="username"
+                type="text"
+                value={username}
+                onChange={(e) => setUsername(e.target.value)}
+                placeholder="seu_usuario"
                 className="bg-surface border-white/10 text-white placeholder:text-muted-foreground focus:border-player focus:ring-player"
                 data-testid="login-email"
                 required
-                autoComplete="email"
+                autoComplete="username"
               />
             </div>
 
@@ -102,6 +125,15 @@ export default function Login() {
             >
               {loading ? "Entrando..." : "Entrar"}
             </Button>
+
+            <button
+              type="button"
+              onClick={() => navigate("/signup")}
+              className="w-full text-center text-sm text-muted-foreground hover:text-player transition-colors"
+              data-testid="signup-link"
+            >
+              Ainda não tem acesso? Pedir cadastro
+            </button>
           </form>
         </div>
 
