@@ -34,7 +34,7 @@ SUPABASE_JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
 
 # Só usado no painel de administração (criar login novo) — NUNCA exposto
 # pro frontend, fica só aqui no backend. Sem essa chave, /api/admin/* não funciona.
-SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '').strip()
 
 # Só esse e-mail consegue acessar as rotas /api/admin/* (criar/gerenciar logins)
 ADMIN_EMAIL = os.environ.get('ADMIN_EMAIL', '').strip().lower()
@@ -45,6 +45,22 @@ admin_router = APIRouter(prefix="/api/admin")
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Confere se a service_role key só tem caracteres ASCII normais (ela é sempre
+# um JWT — só letras, números, -, _ e . — nunca acento nem símbolo estranho).
+# Se tiver algo fora disso, é sinal de corrupção no copiar/colar (geralmente
+# um app trocou uma aspa ou hífen "esperto" por uma versão especial). Melhor
+# avisar isso no log de boot do que só quebrar depois com erro confuso.
+if SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        SUPABASE_SERVICE_ROLE_KEY.encode("ascii")
+    except UnicodeEncodeError as e:
+        bad_char = SUPABASE_SERVICE_ROLE_KEY[e.start:e.end]
+        logger.error(
+            f"⚠️⚠️⚠️ SUPABASE_SERVICE_ROLE_KEY tem um caractere inválido na posição {e.start} "
+            f"({bad_char!r}) — provavelmente corrompeu no copiar/colar. Copia a chave de novo "
+            f"direto do Supabase (Settings → API → service_role) e cola de novo no Render."
+        )
 
 try:
     _jwks_client = PyJWKClient(SUPABASE_JWKS_URL, cache_keys=True, lifespan=600)
@@ -1942,6 +1958,7 @@ async def admin_list_users(admin=Depends(get_current_admin)):
                 "email": u.get("email"),
                 "created_at": u.get("created_at"),
                 "last_sign_in_at": u.get("last_sign_in_at"),
+                "is_admin": bool(ADMIN_EMAIL) and (u.get("email") or "").strip().lower() == ADMIN_EMAIL,
             }
             for u in users
         ]

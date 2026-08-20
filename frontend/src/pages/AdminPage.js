@@ -30,7 +30,7 @@ function displayIdentifier(email) {
 // ============================================================
 // Painel de dispositivos de um usuário — expande dentro da linha dele
 // ============================================================
-const DevicesPanel = ({ userId }) => {
+const DevicesPanel = ({ userId, isAdmin }) => {
   const [loading, setLoading] = useState(true);
   const [devices, setDevices] = useState([]);
   const [maxDevices, setMaxDevices] = useState(1);
@@ -75,6 +75,13 @@ const DevicesPanel = ({ userId }) => {
 
   return (
     <div className="mt-2 mb-3 ml-2 pl-3 border-l-2 border-white/10 space-y-2" data-testid={`devices-panel-${userId}`}>
+      <div className="flex items-center gap-2">
+        <span className="text-xs text-muted-foreground">Tipo de usuário:</span>
+        <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isAdmin ? "bg-tie/20 text-tie" : "bg-player/20 text-player"}`}>
+          {isAdmin ? "👑 Admin" : "Cliente"}
+        </span>
+      </div>
+
       <div className="flex items-center gap-2">
         <Label className="text-xs text-muted-foreground">Limite de dispositivos:</Label>
         <Input
@@ -357,7 +364,14 @@ export default function AdminPage() {
                     data-testid={`admin-user-row-${u.id}`}
                   >
                     <div>
-                      <p className="text-sm text-white">{displayIdentifier(u.email)}</p>
+                      <p className="text-sm font-semibold text-white flex items-center gap-2">
+                        {displayIdentifier(u.email)}
+                        {u.is_admin && (
+                          <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-tie/20 text-tie">
+                            ADMIN
+                          </span>
+                        )}
+                      </p>
                       <p className="text-xs text-muted-foreground">
                         {u.last_sign_in_at ? `Último acesso: ${new Date(u.last_sign_in_at).toLocaleDateString("pt-BR")}` : "Nunca logou"}
                       </p>
@@ -385,7 +399,7 @@ export default function AdminPage() {
                       </Button>
                     </div>
                   </div>
-                  {expandedDevicesFor === u.id && <DevicesPanel userId={u.id} />}
+                  {expandedDevicesFor === u.id && <DevicesPanel userId={u.id} isAdmin={u.is_admin} />}
                 </div>
               ))}
             </div>
