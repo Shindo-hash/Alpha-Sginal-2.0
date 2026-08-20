@@ -5,7 +5,7 @@ import api from "../lib/api"; // axios com token do Supabase anexado automaticam
 import { toast } from "sonner";
 import {
   Zap, LogOut, RotateCcw, ExternalLink, Volume2, VolumeX,
-  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw, CheckCircle2, Download,
+  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw, CheckCircle2, Download, Clock, Camera,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Slider } from "../components/ui/slider";
@@ -17,6 +17,8 @@ import { Input } from "../components/ui/input";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "../components/ui/select";
+import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import html2canvas from "html2canvas";
 
 const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
 
@@ -938,6 +940,70 @@ const UserTriggers = ({ triggerResults = [], onSave, gc }) => {
 };
 
 // ============================================================
+// Desempenho por horário — mostra se a estratégia performa melhor em
+// certos horários do dia (últimos 7 dias)
+// ============================================================
+const HourlyPerformance = ({ apiGame }) => {
+  const [loading, setLoading] = useState(true);
+  const [hourly, setHourly] = useState([]);
+  const [days] = useState(7);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    api.get(`${apiGame}/hourly-performance?days=${days}`)
+      .then((res) => {
+        if (!cancelled) setHourly(res.data.hourly || []);
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [apiGame, days]);
+
+  const chartData = hourly
+    .filter((h) => h.total > 0)
+    .map((h) => ({
+      hour: `${String(h.hour).padStart(2, "0")}h`,
+      rate: h.rate,
+      total: h.total,
+    }));
+
+  if (loading) {
+    return <p className="text-sm text-muted-foreground text-center py-6">Carregando...</p>;
+  }
+
+  if (chartData.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground text-center py-6">
+        Ainda sem dados suficientes dos últimos {days} dias. Volta aqui depois de resolver alguns sinais.
+      </p>
+    );
+  }
+
+  return (
+    <div>
+      <p className="text-xs text-muted-foreground mb-3">
+        Taxa de acerto por horário — últimos {days} dias. Horários com poucos sinais resolvidos são menos confiáveis.
+      </p>
+      <ResponsiveContainer width="100%" height={220}>
+        <BarChart data={chartData}>
+          <CartesianGrid strokeDasharray="3 3" stroke="rgba(255,255,255,0.06)" />
+          <XAxis dataKey="hour" tick={{ fill: "#888", fontSize: 11 }} />
+          <YAxis domain={[0, 100]} tick={{ fill: "#888", fontSize: 11 }} />
+          <Tooltip
+            contentStyle={{ background: "#1c2027", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 8, fontSize: 12 }}
+            formatter={(value, name, props) => [`${value}% (${props.payload.total} sinais)`, "Acerto"]}
+          />
+          <Bar dataKey="rate" fill="#22d3ee" radius={[4, 4, 0, 0]} />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+};
+
+// ============================================================
 // Dashboard Principal
 // ============================================================
 export default function Dashboard() {
@@ -983,6 +1049,8 @@ export default function Dashboard() {
   const [seqMin, setSeqMin] = useState(3);
   const [galeDisplay, setGaleDisplay] = useState(0);
   const [showFullHistory, setShowFullHistory] = useState(false);
+  const [generatingImage, setGeneratingImage] = useState(false);
+  const resultCardRef = useRef(null);
   const [tieWatchEnabled, setTieWatchEnabled] = useState(
     () => localStorage.getItem("alphasignal_tie_watch_enabled") !== "false"
   );
@@ -1014,7 +1082,7 @@ export default function Dashboard() {
 
   const sendFeedback = useCallback(async (signalId, result, extra = {}) => {
     try {
-      await api.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result, ...extra });
+      await api.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result, local_hour: new Date().getHours(), ...extra });
     } catch (e) {}
   }, [API_GAME]);
 
@@ -1274,6 +1342,30 @@ export default function Dashboard() {
     } catch (error) {}
   };
 
+  const handleGenerateImage = async () => {
+    setGeneratingImage(true);
+    try {
+      // Espera o próximo frame — garante que o card oculto já renderizou
+      // com os números atuais antes de tirar o "print" dele.
+      await new Promise((r) => setTimeout(r, 50));
+      const node = resultCardRef.current;
+      if (!node) return;
+      // JPEG não tem transparência — precisa de uma cor de fundo sólida
+      // (senão o html2canvas preenche com branco por padrão)
+      const canvas = await html2canvas(node, { backgroundColor: "#14171c", scale: 2 });
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.92);
+      const link = document.createElement("a");
+      link.href = dataUrl;
+      link.download = `alphasignal-resultado-${new Date().toISOString().slice(0, 10)}.jpg`;
+      link.click();
+      toast.success("Imagem gerada!");
+    } catch (error) {
+      toast.error("Erro ao gerar imagem");
+    } finally {
+      setGeneratingImage(false);
+    }
+  };
+
   const handleLogout = () => {
     logout();
     navigate("/login");
@@ -1288,6 +1380,16 @@ export default function Dashboard() {
     state.stats.total_signals > 0
       ? Math.round((state.stats.wins / state.stats.total_signals) * 100)
       : 0;
+
+  // Detalha os wins em "direto" (sem gale) vs "com gale" — usa o que tiver
+  // no resolved_signals (pode não cobrir 100% se passar de 200 sinais na
+  // sessão, mas cobre a esmagadora maioria dos casos reais).
+  const winsDirecto = (state.resolved_signals || []).filter(
+    (s) => s.result === "win" && (!s.gale || s.gale === 0)
+  ).length;
+  const winsComGale = (state.resolved_signals || []).filter(
+    (s) => s.result === "win" && s.gale > 0
+  ).length;
 
   if (loading) {
     return (
@@ -1413,10 +1515,14 @@ export default function Dashboard() {
 
             {/* Tabs */}
             <Tabs defaultValue="patterns" className="glass rounded-lg p-4">
-              <TabsList className="grid grid-cols-3 mb-4 bg-surface">
+              <TabsList className="grid grid-cols-4 mb-4 bg-surface">
                 <TabsTrigger value="patterns" data-testid="tab-patterns">Padrões</TabsTrigger>
                 <TabsTrigger value="strategies" data-testid="tab-strategies">Estratégias</TabsTrigger>
                 <TabsTrigger value="triggers" data-testid="tab-triggers">Gatilhos</TabsTrigger>
+                <TabsTrigger value="hourly" data-testid="tab-hourly">
+                  <Clock className="w-3.5 h-3.5 mr-1" />
+                  Horários
+                </TabsTrigger>
               </TabsList>
 
               <TabsContent value="patterns">
@@ -1498,6 +1604,10 @@ export default function Dashboard() {
               <TabsContent value="triggers">
                 <UserTriggers triggerResults={state.trigger_results} onSave={handleSaveTriggers} gc={gc} />
               </TabsContent>
+
+              <TabsContent value="hourly">
+                <HourlyPerformance apiGame={API_GAME} />
+              </TabsContent>
             </Tabs>
           </div>
 
@@ -1569,6 +1679,17 @@ export default function Dashboard() {
               </Button>
             </div>
 
+            <Button
+              variant="outline"
+              onClick={handleGenerateImage}
+              disabled={generatingImage}
+              className="w-full border-white/20 hover:bg-white/10"
+              data-testid="generate-image-btn"
+            >
+              <Camera className="w-4 h-4 mr-2" />
+              {generatingImage ? "Gerando imagem..." : "Gerar imagem do placar"}
+            </Button>
+
             {!isFS && <ResolvedSignalsPanel signals={state.resolved_signals} onViewMore={handleViewMore} />}
 
             {!isFS && showFullHistory && (
@@ -1597,6 +1718,63 @@ export default function Dashboard() {
           </div>
         </div>
       </main>
+
+      {/* Card oculto (fora da tela) — só existe pra virar a imagem gerada
+          pelo botão "Gerar imagem do placar". Nunca aparece pro usuário. */}
+      <div style={{ position: "fixed", left: "-9999px", top: 0 }}>
+        <div
+          ref={resultCardRef}
+          style={{
+            width: 500,
+            padding: 40,
+            background: "linear-gradient(135deg, #14171c 0%, #1c2027 100%)",
+            fontFamily: "system-ui, sans-serif",
+            color: "#fff",
+          }}
+        >
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 24 }}>
+            <Zap style={{ width: 28, height: 28, color: "#22d3ee" }} />
+            <span style={{ fontSize: 24, fontWeight: 800 }}>
+              Alpha<span style={{ color: "#22d3ee" }}>Signal</span>
+            </span>
+          </div>
+
+          <p style={{ fontSize: 13, color: "#888", marginBottom: 4 }}>
+            {new Date().toLocaleDateString("pt-BR", { day: "2-digit", month: "long", year: "numeric" })} — {gc.name}
+          </p>
+
+          <div style={{ textAlign: "center", margin: "32px 0" }}>
+            <p style={{ fontSize: 13, color: "#888", textTransform: "uppercase", letterSpacing: 1 }}>Assertividade</p>
+            <p style={{ fontSize: 64, fontWeight: 900, color: "#22d3ee", margin: "4px 0" }}>{assertividade}%</p>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", gap: 32 }}>
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 28, fontWeight: 800, color: "#4ade80" }}>{state.stats.wins}</p>
+              <p style={{ fontSize: 12, color: "#888", textTransform: "uppercase" }}>Wins</p>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 28, fontWeight: 800, color: "#f87171" }}>{state.stats.losses}</p>
+              <p style={{ fontSize: 12, color: "#888", textTransform: "uppercase" }}>Loss</p>
+            </div>
+          </div>
+
+          <div style={{ display: "flex", justifyContent: "center", gap: 32, marginTop: 20, paddingTop: 20, borderTop: "1px solid rgba(255,255,255,0.08)" }}>
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 20, fontWeight: 700, color: "#22d3ee" }}>{winsDirecto}</p>
+              <p style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>Direto</p>
+            </div>
+            <div style={{ textAlign: "center" }}>
+              <p style={{ fontSize: 20, fontWeight: 700, color: "#fbbf24" }}>{winsComGale}</p>
+              <p style={{ fontSize: 11, color: "#888", textTransform: "uppercase" }}>Com Gale</p>
+            </div>
+          </div>
+
+          <p style={{ textAlign: "center", fontSize: 11, color: "#666", marginTop: 32 }}>
+            Sistema de Análise para Cassino Ao Vivo
+          </p>
+        </div>
+      </div>
     </div>
   );
 }

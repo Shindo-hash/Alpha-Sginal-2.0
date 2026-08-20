@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Dict, Any
 import random
 import time
+from datetime import datetime, timedelta, timezone
 import jwt as pyjwt
 from jwt import PyJWKClient
 import httpx
@@ -171,6 +172,28 @@ async def _supabase_request(method: str, url: str, **kwargs) -> httpx.Response:
         raise HTTPException(status_code=502, detail=f"Erro de conexão com o Supabase: {e}")
 
 
+async def _record_hourly_history(user_id: str, game: str, strategy: Optional[str], result: str, local_hour: Optional[int] = None):
+    """
+    Grava 1 linha no histórico de desempenho por horário — usado pra
+    comparação de estratégia por hora do dia. Roda em segundo plano
+    (fire-and-forget); se falhar, só loga um aviso, nunca quebra a resposta
+    principal do feedback.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return
+    hour = local_hour if local_hour is not None and 0 <= local_hour <= 23 else int(time.strftime("%H"))
+    try:
+        async with httpx.AsyncClient() as client:
+            await client.post(
+                f"{SUPABASE_URL}/rest/v1/resolved_signals_history",
+                headers=_supabase_admin_headers(),
+                json={"user_id": user_id, "game": game, "strategy": strategy or "desconhecida", "result": result, "hour": hour},
+                timeout=10,
+            )
+    except Exception as e:
+        logger.warning(f"Falha ao gravar histórico de horário: {e}")
+
+
 # ============================================================
 # Limite de dispositivos — cada usuário só pode logar em N aparelhos
 # diferentes ao mesmo tempo (configurável por cliente, padrão 1). Guardado
@@ -221,7 +244,6 @@ async def _load_user_devices(user_id: str, force: bool = False) -> Dict[str, Any
 async def _touch_device(user_id: str, device_id: str):
     """Atualiza o 'visto por último' em segundo plano — não trava a requisição."""
     try:
-        from datetime import datetime, timezone
         async with httpx.AsyncClient() as client:
             await client.patch(
                 f"{SUPABASE_URL}/rest/v1/user_devices",
@@ -1428,6 +1450,9 @@ async def signal_feedback(request: Request, user: str = Depends(get_current_user
         else:
             state["strategy_stats"][strat]["losses"] += 1
 
+    # Grava no histórico de desempenho por horário (não trava a resposta)
+    asyncio.create_task(_record_hourly_history(user, "bacbo", strat, data.get("result"), data.get("local_hour")))
+
     # Se esse sinal venceu por causa de um Empate, e tinha um Empate Seco pendente
     # NO MESMO ROUND, resolve ele aqui também — mas SEM contar de novo no placar.
     tie_watch_id = data.get("tie_watch_id")
@@ -1606,6 +1631,52 @@ async def force_analyze(user: str = Depends(get_current_user)):
     state = get_state(user)
     analysis = await run_analysis(state)
     return analysis
+
+
+@api_router.get("/hourly-performance")
+async def get_hourly_performance(game: str = "bacbo", days: int = 7, user: str = Depends(get_current_user)):
+    """
+    Desempenho (win rate) por hora do dia, olhando os últimos N dias (padrão
+    7). Ajuda a ver se alguma estratégia performa melhor em certos horários.
+    """
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        return {"hourly": [], "days": days}
+
+    since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
+
+    resp = await _supabase_request(
+        "GET", f"{SUPABASE_URL}/rest/v1/resolved_signals_history",
+        headers=_supabase_admin_headers(),
+        params={
+            "user_id": f"eq.{user}",
+            "game": f"eq.{game}",
+            "created_at": f"gte.{since}",
+            "select": "hour,result",
+        },
+    )
+
+    if resp.status_code >= 400:
+        logger.error(f"Supabase (hourly-performance) {resp.status_code}: {resp.text}")
+        raise HTTPException(status_code=resp.status_code, detail="Falha ao buscar histórico de horários.")
+
+    rows = resp.json()
+    buckets = {h: {"wins": 0, "losses": 0} for h in range(24)}
+    for r in rows:
+        h = r.get("hour")
+        if h is None or h not in buckets:
+            continue
+        if r.get("result") == "win":
+            buckets[h]["wins"] += 1
+        else:
+            buckets[h]["losses"] += 1
+
+    hourly = []
+    for h in range(24):
+        total = buckets[h]["wins"] + buckets[h]["losses"]
+        rate = round((buckets[h]["wins"] / total) * 100, 1) if total > 0 else None
+        hourly.append({"hour": h, "wins": buckets[h]["wins"], "losses": buckets[h]["losses"], "total": total, "rate": rate})
+
+    return {"hourly": hourly, "days": days}
 
 
 # ============================================================
@@ -1838,6 +1909,9 @@ async def fs_signal_feedback(request: Request, user: str = Depends(get_current_u
             state["fs_strategy_stats"][strat]["wins"] += 1
         else:
             state["fs_strategy_stats"][strat]["losses"] += 1
+
+    asyncio.create_task(_record_hourly_history(user, "fs", strat, data.get("result"), data.get("local_hour")))
+
     state["fs_cooldown_results"] = 2
     return {"success": True, "stats": state["fs_stats"]}
 
@@ -1951,10 +2025,6 @@ async def admin_list_users(admin=Depends(get_current_admin)):
 
     data = resp.json()
     users = data.get("users", data if isinstance(data, list) else [])
-    logger.info(f"🔍 DEBUG ADMIN_EMAIL={ADMIN_EMAIL!r}")
-    for u in users:
-        u_email_norm = (u.get("email") or "").strip().lower()
-        logger.info(f"🔍 DEBUG comparando: {u_email_norm!r} == {ADMIN_EMAIL!r} -> {u_email_norm == ADMIN_EMAIL}")
     return {
         "users": [
             {
