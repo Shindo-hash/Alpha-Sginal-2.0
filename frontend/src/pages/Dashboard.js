@@ -1,11 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo, memo } from "react";
 import { useAuth } from "../App";
 import { useNavigate } from "react-router-dom";
-import axios from "axios";
+import api from "../lib/api"; // axios com token do Supabase anexado automaticamente
 import { toast } from "sonner";
 import {
   Zap, LogOut, RotateCcw, ExternalLink, Volume2, VolumeX,
-  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw, CheckCircle2,
+  Activity, TrendingUp, AlertTriangle, Settings, ChevronRight, RefreshCw, CheckCircle2, Download,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Slider } from "../components/ui/slider";
@@ -499,19 +499,21 @@ const PatternHeatmap = memo(({ patterns, triggerResults = [], gc }) => {
 // ============================================================
 const StrategySelector = memo(({ active, onChange, strategyStats = {}, autoSelect = false, isFS = false, seqMin, onSeqMinChange }) => {
   const allStrategies = [
-    { id: "adaptive",    name: "Adaptativo 🧠", desc: "Mais sinais",          tooltip: "Analisa o padrão dos últimos 3 resultados." },
-    { id: "number",      name: "Número 🎲",      desc: "Sozinho",              tooltip: "Vê o que o número do dado vencedor (2-12) costuma puxar em seguida." },
-    { id: "number_pro",  name: "Número PRO 🎲",  desc: "Consenso numérico",    tooltip: "Igual à Número, mas só sinaliza se o Adaptativo concordar com a mesma cor." },
-    { id: "consensus",   name: "Consenso ⚡",    desc: "Equilíbrio ideal",     tooltip: "Combina 3 estratégias, sinaliza só quando 2/3 concordam." },
-    { id: "sequential",  name: "Fluxo 🌊",       desc: "Sequência + retorno",  tooltip: "Ignora Empates, detecta sequência de N+ iguais e aposta na cor principal voltar após alternância." },
-    { id: "alternancia", name: "Alternância 🔁", desc: "Ping-pong + Duplas",   tooltip: "Detecta ritmo da mesa: alternância 1x1 (P→B→P) ou duplas 2x2 (PP→BB→PP)." },
+    { id: "adaptive",       name: "Adaptativo 🧠",   desc: "Mais sinais",          tooltip: "Analisa o padrão dos últimos 3 resultados." },
+    { id: "number",         name: "Número 🎲",       desc: "Sozinho",              tooltip: "Vê o que o número do dado vencedor (2-12) costuma puxar em seguida, no histórico inteiro." },
+    { id: "number_pro",     name: "Número PRO 🎲",   desc: "Consenso numérico",    tooltip: "Igual à Número, mas só sinaliza se o Adaptativo concordar com a mesma cor." },
+    { id: "number_20",      name: "Número 20 🎯",    desc: "Últimas 20 rodadas",   tooltip: "Igual à Número, mas olha só as últimas 20 rodadas — reage mais rápido a mudança de padrão da mesa." },
+    { id: "number_20_pro",  name: "Número 20 PRO 🎯", desc: "20 rodadas + consenso", tooltip: "Igual à Número 20, mas só sinaliza se o Adaptativo concordar com a mesma cor." },
+    { id: "consensus",      name: "Consenso ⚡",     desc: "Equilíbrio ideal",     tooltip: "Combina 3 estratégias, sinaliza só quando 2/3 concordam." },
+    { id: "sequential",     name: "Fluxo 🌊",        desc: "Sequência + retorno",  tooltip: "Ignora Empates, detecta sequência de N+ iguais e aposta na cor principal voltar após alternância." },
+    { id: "alternancia",    name: "Alternância 🔁",  desc: "Ping-pong + Duplas",   tooltip: "Detecta ritmo da mesa: alternância 1x1 (P→B→P) ou duplas 2x2 (PP→BB→PP)." },
   ];
 
-  // BacBo: Adaptativo, Número, Número PRO, Consenso
+  // BacBo: Adaptativo, Número, Número PRO, Número 20, Número 20 PRO, Consenso
   // FS: Adaptativo, Fluxo, Alternância
   const strategies = isFS
     ? allStrategies.filter(s => ["adaptive", "sequential", "alternancia"].includes(s.id))
-    : allStrategies.filter(s => ["adaptive", "number", "number_pro", "consensus"].includes(s.id));
+    : allStrategies.filter(s => ["adaptive", "number", "number_pro", "number_20", "number_20_pro", "consensus"].includes(s.id));
 
   const getRate = (id) => {
     const s = strategyStats[id];
@@ -647,7 +649,7 @@ const FullHistoryModal = ({ signals, stats, strategyStats, sessionStartTime, onC
   const [openId, setOpenId] = useState(null);
   const [tab, setTab] = useState("all");
   const winRate = stats.total_signals > 0 ? Math.round((stats.wins / stats.total_signals) * 100) : 0;
-  const strategyLabels = { adaptive: "Adaptativo", number: "Número", number_pro: "Número PRO", consensus: "Consenso" };
+  const strategyLabels = { adaptive: "Adaptativo", number: "Número", number_pro: "Número PRO", number_20: "Número 20", number_20_pro: "Número 20 PRO", consensus: "Consenso" };
 
   const colorSignals = signals.filter(s => s.kind !== "tie_watch");
   const tieSignals = signals.filter(s => s.kind === "tie_watch"); // só wins (backend não loga loss aqui)
@@ -955,10 +957,12 @@ export default function Dashboard() {
     min_probability: 60,
     auto_select: true,
     strategy_stats: {
-      adaptive:   { wins: 0, losses: 0, total: 0 },
-      number:     { wins: 0, losses: 0, total: 0 },
-      number_pro: { wins: 0, losses: 0, total: 0 },
-      consensus:  { wins: 0, losses: 0, total: 0 },
+      adaptive:      { wins: 0, losses: 0, total: 0 },
+      number:        { wins: 0, losses: 0, total: 0 },
+      number_pro:    { wins: 0, losses: 0, total: 0 },
+      number_20:     { wins: 0, losses: 0, total: 0 },
+      number_20_pro: { wins: 0, losses: 0, total: 0 },
+      consensus:     { wins: 0, losses: 0, total: 0 },
     },
     percentages: { Player: 0, Banker: 0, Tie: 0 },
     patterns: {},
@@ -974,9 +978,22 @@ export default function Dashboard() {
   const [soundEnabled, setSoundEnabled] = useState(true);
   const [loading, setLoading] = useState(true);
   const [localProbability, setLocalProbability] = useState(60);
+  const [localCooldown, setLocalCooldown] = useState(2);
+  const [localNumberWindow, setLocalNumberWindow] = useState(20);
   const [seqMin, setSeqMin] = useState(3);
   const [galeDisplay, setGaleDisplay] = useState(0);
   const [showFullHistory, setShowFullHistory] = useState(false);
+  const [tieWatchEnabled, setTieWatchEnabled] = useState(
+    () => localStorage.getItem("alphasignal_tie_watch_enabled") !== "false"
+  );
+  const tieWatchEnabledRef = useRef(tieWatchEnabled);
+  useEffect(() => {
+    tieWatchEnabledRef.current = tieWatchEnabled;
+    localStorage.setItem("alphasignal_tie_watch_enabled", String(tieWatchEnabled));
+    if (!tieWatchEnabled) {
+      pendingTieWatchRef.current = null; // descarta qualquer pendência ao desativar
+    }
+  }, [tieWatchEnabled]);
   const stableHistoryRef = useRef([]);
   const stableResolvedRef = useRef([]);
   const stableLogsRef = useRef([]);
@@ -997,13 +1014,13 @@ export default function Dashboard() {
 
   const sendFeedback = useCallback(async (signalId, result, extra = {}) => {
     try {
-      await axios.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result, ...extra });
+      await api.post(`${API_GAME}/signal/feedback`, { signal_id: signalId, result, ...extra });
     } catch (e) {}
   }, [API_GAME]);
 
   const fetchState = useCallback(async () => {
     try {
-      const response = await axios.get(`${API_GAME}/state`);
+      const response = await api.get(`${API_GAME}/state`);
       localStorage.setItem("alphasignal_auth_ts", Date.now().toString());
       const newState = response.data;
 
@@ -1058,7 +1075,7 @@ export default function Dashboard() {
             // causava contagem dupla quando as duas resoluções eram separadas.
             let tieWatchIdToResolve = null;
             let tieWatchMultiplier = null;
-            if (result.winner === "Tie" && !isFS && pendingTieWatchRef.current) {
+            if (result.winner === "Tie" && !isFS && tieWatchEnabledRef.current && pendingTieWatchRef.current) {
               tieWatchIdToResolve = pendingTieWatchRef.current.id;
               tieWatchMultiplier = getTieMultiplier(pendingTieWatchRef.current.number);
               toast.success(`🟡 Empate Seco também bateu (número ${pendingTieWatchRef.current.number}${tieWatchMultiplier ? `, ${tieWatchMultiplier}x` : ""}) — já contado pelo sinal de cor`);
@@ -1108,7 +1125,8 @@ export default function Dashboard() {
       // Empate Seco 🟡 — entra no placar geral quando ganha. O BACKEND decide
       // se já foi contado pelo sinal de cor (resposta "duplicate"), evitando
       // contar 2x sem depender de cálculo aqui no front.
-      if (!isFS) {
+      // Só roda se o cliente não desativou o Empate Seco no toggle.
+      if (!isFS && tieWatchEnabledRef.current) {
         if (hasNewResult && pendingTieWatchRef.current) {
           const pendingTW = pendingTieWatchRef.current;
           const newResults = atLimit ? [lastResult] : newState.history.slice(prevLen);
@@ -1116,7 +1134,7 @@ export default function Dashboard() {
           const multiplier = getTieMultiplier(pendingTW.number);
           pendingTieWatchRef.current = null;
           try {
-            const res = await axios.post(`${API_GAME}/tiewatch/feedback`, {
+            const res = await api.post(`${API_GAME}/tiewatch/feedback`, {
               watch_id: pendingTW.id,
               result: deuTie ? "win" : "loss",
               multiplier,
@@ -1173,8 +1191,10 @@ export default function Dashboard() {
       lastHistoryLenRef.current = newLen;
       setState(newState);
       if (loading) setLocalProbability(newState.min_probability);
+      if (loading) setLocalCooldown(newState.cooldown_rounds ?? 2);
+      if (loading) setLocalNumberWindow(newState.number_window ?? 20);
     } catch (error) {
-      console.error("Error fetching state:", error);
+      console.error("Error fetching state:", error?.response?.status, error?.response?.data || error.message);
     } finally {
       setLoading(false);
     }
@@ -1188,7 +1208,7 @@ export default function Dashboard() {
 
   const handleStrategyChange = useCallback(async (strategy) => {
     try {
-      await axios.post(`${API_GAME}/strategy`, { strategy });
+      await api.post(`${API_GAME}/strategy`, { strategy });
       pendingSignalRef.current = null;
       resolvingRef.current = false;
       galeRef.current = 0;
@@ -1203,13 +1223,13 @@ export default function Dashboard() {
 
   const handleSaveTriggers = async (list) => {
     try {
-      await axios.post(`${API_GAME}/triggers`, { triggers: list });
+      await api.post(`${API_GAME}/triggers`, { triggers: list });
     } catch (e) {}
   };
 
   const handleAutoSelect = useCallback(async (enabled) => {
     try {
-      await axios.post(`${API_GAME}/auto_select`, { enabled });
+      await api.post(`${API_GAME}/auto_select`, { enabled });
       toast.info(enabled ? "Auto-seleção ativada" : "Auto-seleção desativada");
       fetchState();
     } catch (error) {}
@@ -1217,7 +1237,21 @@ export default function Dashboard() {
 
   const handleProbabilityChange = async (value) => {
     try {
-      await axios.post(`${API_GAME}/probability`, { min_probability: value[0] });
+      await api.post(`${API_GAME}/probability`, { min_probability: value[0] });
+      fetchState();
+    } catch (error) {}
+  };
+
+  const handleCooldownChange = async (value) => {
+    try {
+      await api.post(`${API_GAME}/cooldown`, { cooldown_rounds: value[0] });
+      fetchState();
+    } catch (error) {}
+  };
+
+  const handleNumberWindowChange = async (value) => {
+    try {
+      await api.post(`${API_GAME}/number_window`, { number_window: value[0] });
       fetchState();
     } catch (error) {}
   };
@@ -1225,7 +1259,7 @@ export default function Dashboard() {
   const handleSeqMinChange = useCallback(async (val) => {
     setSeqMin(val);
     try {
-      await axios.post(`${API_GAME}/seq_min`, { seq_min: val });
+      await api.post(`${API_GAME}/seq_min`, { seq_min: val });
     } catch (e) {}
   }, [API_GAME]);
 
@@ -1233,7 +1267,7 @@ export default function Dashboard() {
 
   const handleReset = async () => {
     try {
-      await axios.post(`${API_GAME}/reset`);
+      await api.post(`${API_GAME}/reset`);
       if (soundEnabled) playSound("notification");
       toast.info("Estatísticas resetadas");
       fetchState();
@@ -1300,6 +1334,16 @@ export default function Dashboard() {
               <span className="hidden md:inline">Trocar jogo</span>
             </Button>
 
+            <a
+              href="/AlphaSignal-Capture.zip"
+              download
+              title="Baixar extensão de captura"
+              className="text-muted-foreground hover:text-player flex items-center justify-center"
+              data-testid="download-extension-link"
+            >
+              <Download className="w-5 h-5" />
+            </a>
+
             <Button
               variant="ghost"
               size="icon"
@@ -1329,18 +1373,6 @@ export default function Dashboard() {
           <div className="glass border border-tie/50 rounded-lg p-3 flex items-center gap-2 animate-fadeIn">
             <AlertTriangle className="w-5 h-5 text-tie" />
             <span className="text-tie text-sm">{state.drift.message}</span>
-          </div>
-        )}
-
-        {!isFS && state.current_tie_watch && (
-          <div className="glass border border-tie/50 rounded-lg p-3 flex items-start gap-2 animate-fadeIn" data-testid="tie-watch-alert">
-            <span className="text-lg leading-none">🟡</span>
-            <div className="flex-1">
-              <p className="text-tie text-sm font-semibold">Empate Seco ativo — conta no placar geral</p>
-              {state.current_tie_watch.alerts.map((a, i) => (
-                <p key={i} className="text-xs text-muted-foreground">{a.reason}</p>
-              ))}
-            </div>
           </div>
         )}
 
@@ -1425,6 +1457,42 @@ export default function Dashboard() {
                     </div>
                   </div>
                 )}
+
+                {!isFS && (state.active_strategy === "number_20" || state.active_strategy === "number_20_pro") && (
+                  <div className="mt-4 space-y-2">
+                    <Label className="text-sm">Janela da estratégia: últimas {localNumberWindow} rodadas</Label>
+                    <Slider
+                      value={[localNumberWindow]}
+                      onValueChange={(v) => setLocalNumberWindow(v[0])}
+                      onValueCommit={handleNumberWindowChange}
+                      min={5} max={100} step={5}
+                      className="cursor-pointer"
+                      data-testid="number-window-slider"
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Reage rápido (5)</span>
+                      <span>Mais histórico (100)</span>
+                    </div>
+                  </div>
+                )}
+
+                {!isFS && (
+                  <div className="mt-4 space-y-2">
+                    <Label className="text-sm">Cooldown: {localCooldown} rodada{localCooldown !== 1 ? "s" : ""} de descanso após cada sinal</Label>
+                    <Slider
+                      value={[localCooldown]}
+                      onValueChange={(v) => setLocalCooldown(v[0])}
+                      onValueCommit={handleCooldownChange}
+                      min={0} max={10} step={1}
+                      className="cursor-pointer"
+                      data-testid="cooldown-slider"
+                    />
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Sem espera (0)</span>
+                      <span>Mais cauteloso (10)</span>
+                    </div>
+                  </div>
+                )}
               </TabsContent>
 
               <TabsContent value="triggers">
@@ -1441,6 +1509,34 @@ export default function Dashboard() {
               galeCount={galeDisplay}
               gc={gc}
             />
+
+            {!isFS && (
+              <div className="glass rounded-lg p-3 flex items-center justify-between" data-testid="tie-watch-toggle">
+                <div>
+                  <p className="text-sm font-medium text-white flex items-center gap-1.5">🟡 Empate Seco</p>
+                  <p className="text-xs text-muted-foreground">
+                    {tieWatchEnabled ? "Ativo — conta no placar quando bate" : "Desativado — só o sinal principal"}
+                  </p>
+                </div>
+                <Switch
+                  checked={tieWatchEnabled}
+                  onCheckedChange={setTieWatchEnabled}
+                  data-testid="tie-watch-switch"
+                />
+              </div>
+            )}
+
+            {!isFS && tieWatchEnabled && state.current_tie_watch && (
+              <div className="glass border border-tie/50 rounded-lg p-3 flex items-start gap-2 animate-fadeIn" data-testid="tie-watch-alert">
+                <span className="text-lg leading-none">🟡</span>
+                <div className="flex-1">
+                  <p className="text-tie text-sm font-semibold">Empate Seco ativo — conta no placar geral</p>
+                  {state.current_tie_watch.alerts.map((a, i) => (
+                    <p key={i} className="text-xs text-muted-foreground">{a.reason}</p>
+                  ))}
+                </div>
+              </div>
+            )}
 
             <div className="grid grid-cols-3 gap-2">
               <Button

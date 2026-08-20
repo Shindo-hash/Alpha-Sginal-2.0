@@ -1,17 +1,15 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useAuth } from "../App";
+import { supabase } from "../lib/supabaseClient";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Label } from "../components/ui/label";
 import { MessageCircle, Zap } from "lucide-react";
-import axios from "axios";
 import { toast } from "sonner";
 
-const API = `${process.env.REACT_APP_BACKEND_URL}/api`;
-
 export default function Login() {
-  const [username, setUsername] = useState("");
+  const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [loading, setLoading] = useState(false);
   const { login } = useAuth();
@@ -22,18 +20,18 @@ export default function Login() {
     setLoading(true);
 
     try {
-      const response = await axios.post(`${API}/login`, {
-        username,
-        password,
-      });
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
 
-      if (response.data.success) {
-        login();
-        toast.success("Login realizado com sucesso!");
-        navigate("/");
+      if (error) {
+        toast.error("Credenciais inválidas");
+        return;
       }
+
+      await login(); // avisa o backend pra começar sessão limpa desse usuário
+      toast.success("Login realizado com sucesso!");
+      navigate("/");
     } catch (error) {
-      toast.error("Credenciais inválidas");
+      toast.error("Erro ao entrar. Tenta de novo.");
     } finally {
       setLoading(false);
     }
@@ -63,18 +61,19 @@ export default function Login() {
         >
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="space-y-2">
-              <Label htmlFor="username" className="text-white">
-                Usuário
+              <Label htmlFor="email" className="text-white">
+                E-mail
               </Label>
               <Input
-                id="username"
-                type="text"
-                value={username}
-                onChange={(e) => setUsername(e.target.value)}
-                placeholder="Digite seu usuário"
+                id="email"
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="seu@email.com"
                 className="bg-surface border-white/10 text-white placeholder:text-muted-foreground focus:border-player focus:ring-player"
-                data-testid="login-username"
+                data-testid="login-email"
                 required
+                autoComplete="email"
               />
             </div>
 
@@ -91,6 +90,7 @@ export default function Login() {
                 className="bg-surface border-white/10 text-white placeholder:text-muted-foreground focus:border-player focus:ring-player"
                 data-testid="login-password"
                 required
+                autoComplete="current-password"
               />
             </div>
 

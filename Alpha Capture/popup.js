@@ -4,6 +4,22 @@ function atualizar() {
   chrome.runtime.sendMessage({ type: 'GET_RESULTS' }, (response) => {
     if (!response) return;
 
+    const loginEl = document.getElementById('login-status');
+    if (response.logado) {
+      loginEl.textContent = response.pendentes > 0
+        ? `✅ Login ativo — reenviando ${response.pendentes} pendente(s)`
+        : '✅ Login ativo — enviando dados';
+      loginEl.className = 'login-status ok';
+    } else if (response.expirado) {
+      loginEl.textContent = response.pendentes > 0
+        ? `⏰ Sessão expirou — ${response.pendentes} resultado(s) na fila`
+        : '⏰ Sessão expirou — reabra o AlphaSignal';
+      loginEl.className = 'login-status off';
+    } else {
+      loginEl.textContent = '⚠️ Sem login — abra o AlphaSignal e entre';
+      loginEl.className = 'login-status off';
+    }
+
     const agora = Date.now();
     const bacbo = response.bacbo;
     const fs = response.fs;

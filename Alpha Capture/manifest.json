@@ -17,6 +17,9 @@
     "*://*.evolutiongaming.com/*",
     "*://*.evo-games.com/*",
     "*://s3.eu-central-1.amazonaws.com/*",
+    "https://alpha-sginal-2-0.vercel.app/*",
+    "http://localhost:3000/*",
+    "https://alpha-sginal-2-0.onrender.com/*",
     "http://localhost:8001/*"
   ],
 
@@ -51,6 +54,14 @@
       "js": ["content.js"],
       "run_at": "document_start",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "https://alpha-sginal-2-0.vercel.app/*",
+        "http://localhost:3000/*"
+      ],
+      "js": ["authBridge.js"],
+      "run_at": "document_idle"
     }
   ],
 

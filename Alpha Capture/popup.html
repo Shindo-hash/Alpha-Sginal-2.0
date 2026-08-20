@@ -18,10 +18,15 @@
     .empate { color: #f0a500; }
     .count { font-size: 18px; font-weight: bold; color: #4ecca3; min-width: 30px; text-align: right; }
     .time { font-size: 10px; color: #555; margin-top: 2px; }
+    .login-status { text-align: center; font-size: 11px; padding: 6px; border-radius: 6px; margin-bottom: 10px; }
+    .login-status.ok { background: #143d2b; color: #4ecca3; }
+    .login-status.off { background: #3d1414; color: #e94560; }
   </style>
 </head>
 <body>
   <h2>🎯 AlphaSignal Capture</h2>
+
+  <div class="login-status" id="login-status">Verificando login...</div>
 
   <div class="section">
     <div class="section-header">
