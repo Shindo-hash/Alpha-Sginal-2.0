@@ -47,6 +47,24 @@ admin_router = APIRouter(prefix="/api/admin")
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+# Cliente HTTP único, reaproveitado em toda chamada ao Supabase — evita
+# criar um "navegador" novo do zero (com todo o contexto de rede/SSL) a
+# cada requisição, o que consumia memória à toa e ajudou a estourar o
+# limite do Render com só 2 usuários simultâneos.
+_http_client: Optional[httpx.AsyncClient] = None
+
+def get_http_client() -> httpx.AsyncClient:
+    global _http_client
+    if _http_client is None:
+        _http_client = httpx.AsyncClient(timeout=15)
+    return _http_client
+
+@app.on_event("shutdown")
+async def _close_http_client():
+    global _http_client
+    if _http_client is not None:
+        await _http_client.aclose()
+
 # Confere se a service_role key só tem caracteres ASCII normais (ela é sempre
 # um JWT — só letras, números, -, _ e . — nunca acento nem símbolo estranho).
 # Se tiver algo fora disso, é sinal de corrupção no copiar/colar (geralmente
@@ -162,10 +180,13 @@ async def _supabase_request(method: str, url: str, **kwargs) -> httpx.Response:
     quebra a resposta ANTES do CORS ser aplicado — o navegador então mostra
     "bloqueado por CORS", mascarando o erro real. Com isso, sempre volta um
     erro de verdade (502), com CORS certo, e com a mensagem real no log.
+
+    Usa o cliente HTTP compartilhado (get_http_client) em vez de criar um
+    novo a cada chamada — evita gasto de memória desnecessário.
     """
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.request(method, url, timeout=15, **kwargs)
+        client = get_http_client()
+        resp = await client.request(method, url, timeout=15, **kwargs)
         return resp
     except Exception as e:
         logger.error(f"Erro de conexão com o Supabase ({method} {url}): {e}")
@@ -183,13 +204,13 @@ async def _record_hourly_history(user_id: str, game: str, strategy: Optional[str
         return
     hour = local_hour if local_hour is not None and 0 <= local_hour <= 23 else int(time.strftime("%H"))
     try:
-        async with httpx.AsyncClient() as client:
-            await client.post(
-                f"{SUPABASE_URL}/rest/v1/resolved_signals_history",
-                headers=_supabase_admin_headers(),
-                json={"user_id": user_id, "game": game, "strategy": strategy or "desconhecida", "result": result, "hour": hour},
-                timeout=10,
-            )
+        client = get_http_client()
+        await client.post(
+            f"{SUPABASE_URL}/rest/v1/resolved_signals_history",
+            headers=_supabase_admin_headers(),
+            json={"user_id": user_id, "game": game, "strategy": strategy or "desconhecida", "result": result, "hour": hour},
+            timeout=10,
+        )
     except Exception as e:
         logger.warning(f"Falha ao gravar histórico de horário: {e}")
 
@@ -216,19 +237,19 @@ async def _load_user_devices(user_id: str, force: bool = False) -> Dict[str, Any
 
     if SUPABASE_SERVICE_ROLE_KEY:
         try:
-            async with httpx.AsyncClient() as client:
-                devices_resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/user_devices",
-                    headers=_supabase_admin_headers(),
-                    params={"user_id": f"eq.{user_id}", "select": "device_id"},
-                    timeout=10,
-                )
-                limit_resp = await client.get(
-                    f"{SUPABASE_URL}/rest/v1/user_device_limits",
-                    headers=_supabase_admin_headers(),
-                    params={"user_id": f"eq.{user_id}", "select": "max_devices"},
-                    timeout=10,
-                )
+            client = get_http_client()
+            devices_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/user_devices",
+                headers=_supabase_admin_headers(),
+                params={"user_id": f"eq.{user_id}", "select": "device_id"},
+                timeout=10,
+            )
+            limit_resp = await client.get(
+                f"{SUPABASE_URL}/rest/v1/user_device_limits",
+                headers=_supabase_admin_headers(),
+                params={"user_id": f"eq.{user_id}", "select": "max_devices"},
+                timeout=10,
+            )
             if devices_resp.status_code < 400:
                 devices = {d["device_id"] for d in devices_resp.json()}
             if limit_resp.status_code < 400 and limit_resp.json():
@@ -241,17 +262,30 @@ async def _load_user_devices(user_id: str, force: bool = False) -> Dict[str, Any
     return result
 
 
+# Guarda quando cada dispositivo foi "tocado" (last_seen atualizado) pela
+# última vez — evita mandar um PATCH pro Supabase a cada poll de 500ms,
+# que era o principal motivo do consumo de memória alto com poucos
+# usuários simultâneos. Só atualiza de verdade a cada 2 minutos por
+# dispositivo, o resto do tempo nem chega a criar uma chamada de rede.
+_last_touch: Dict[str, float] = {}
+TOUCH_THROTTLE_SECONDS = 120
+
 async def _touch_device(user_id: str, device_id: str):
-    """Atualiza o 'visto por último' em segundo plano — não trava a requisição."""
+    """Atualiza o 'visto por último' em segundo plano — throttled, não trava a requisição."""
+    key = f"{user_id}:{device_id}"
+    now = time.time()
+    if now - _last_touch.get(key, 0) < TOUCH_THROTTLE_SECONDS:
+        return
+    _last_touch[key] = now
     try:
-        async with httpx.AsyncClient() as client:
-            await client.patch(
-                f"{SUPABASE_URL}/rest/v1/user_devices",
-                headers=_supabase_admin_headers(),
-                params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
-                json={"last_seen": datetime.now(timezone.utc).isoformat()},
-                timeout=10,
-            )
+        client = get_http_client()
+        await client.patch(
+            f"{SUPABASE_URL}/rest/v1/user_devices",
+            headers=_supabase_admin_headers(),
+            params={"user_id": f"eq.{user_id}", "device_id": f"eq.{device_id}"},
+            json={"last_seen": datetime.now(timezone.utc).isoformat()},
+            timeout=10,
+        )
     except Exception:
         pass
 
@@ -274,13 +308,13 @@ async def _register_device_if_allowed(user_id: str, device_id: str) -> bool:
         return False
 
     try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.post(
-                f"{SUPABASE_URL}/rest/v1/user_devices",
-                headers=_supabase_admin_headers(),
-                json={"user_id": user_id, "device_id": device_id},
-                timeout=10,
-            )
+        client = get_http_client()
+        resp = await client.post(
+            f"{SUPABASE_URL}/rest/v1/user_devices",
+            headers=_supabase_admin_headers(),
+            json={"user_id": user_id, "device_id": device_id},
+            timeout=10,
+        )
         if resp.status_code < 400:
             info["devices"].add(device_id)
     except Exception as e:

@@ -1270,7 +1270,10 @@ export default function Dashboard() {
 
   useEffect(() => {
     fetchState();
-    const interval = setInterval(fetchState, 500);
+    // 1.5s em vez de 500ms — reduz bastante a carga no servidor (memória e
+    // rede) sem perder responsividade perceptível, já que o jogo em si não
+    // muda de resultado múltiplas vezes por segundo.
+    const interval = setInterval(fetchState, 1500);
     return () => clearInterval(interval);
   }, [fetchState]);
 
