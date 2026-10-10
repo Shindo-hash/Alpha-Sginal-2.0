@@ -29,7 +29,7 @@ const GAME_CONFIGS = {
   bacbo: {
     name: "Bac Bo",
     emoji: "🎲",
-    link: "https://cassino.bet.br/games/evolution/bac-bo",
+    link: "https://apostando.games/casino/Evolution/GPKEVO_ed1d929364d67d15bcbb855b77fbf112",
     linkLabel: "Ir para Bac Bo",
     apiPrefix: "",           // /api/state, /api/historico...
     // Mapeamento winner → aparência
