@@ -17,6 +17,7 @@
     "*://*.evolutiongaming.com/*",
     "*://*.evo-games.com/*",
     "*://s3.eu-central-1.amazonaws.com/*",
+    "*://*/frontend/evo/*",
     "https://alpha-sginal-2-0.vercel.app/*",
     "http://localhost:3000/*",
     "https://alpha-sginal-2-0.onrender.com/*",
@@ -35,7 +36,8 @@
         "*://*.evolution.com/*",
         "*://*.evolutiongaming.com/*",
         "*://*.evo-games.com/*",
-        "*://s3.eu-central-1.amazonaws.com/*"
+        "*://s3.eu-central-1.amazonaws.com/*",
+        "*://*/frontend/evo/*"
       ],
       "js": ["inject.js"],
       "run_at": "document_start",
@@ -49,7 +51,8 @@
         "*://*.evolution.com/*",
         "*://*.evolutiongaming.com/*",
         "*://*.evo-games.com/*",
-        "*://s3.eu-central-1.amazonaws.com/*"
+        "*://s3.eu-central-1.amazonaws.com/*",
+        "*://*/frontend/evo/*"
       ],
       "js": ["content.js"],
       "run_at": "document_start",
