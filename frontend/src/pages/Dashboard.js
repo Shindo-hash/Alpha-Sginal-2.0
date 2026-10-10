@@ -51,7 +51,7 @@ const GAME_CONFIGS = {
   football_studio: {
     name: "Football Studio",
     emoji: "⚽",
-    link: "https://cassino.bet.br/games/evolution/football-studio",
+    link: "https://apostando.games/casino/Evolution/GPKEVO_479700aae513a348910d934e9595093f",
     linkLabel: "Ir para Football Studio",
     apiPrefix: "/fs",        // /api/fs/state, /api/fs/historico...
     getOutcome: (winner) => {
